@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         Tw33k Tools - Target Data
 // @namespace    https://github.com/Tw33k
-// @version      1.5.1
-// @description  A general-purpose dev/diagnostic tool for browser-based games: DOM/element inspection, storage/cookies, network traffic (catalog, diffing, waterfall), WebSocket (catalog, resend), page timing, script exec (sandboxed/path-access), JS console, Token Inspector, Recorder, Event/DOM/Storage watch, Snapshots, Value Tracer, Replay/Edit (sweeps w/ payload presets, anomaly diff, automation), page-load diffing, recon (fingerprint, misconfig, findings), discovery (brute-force, crawler), Export/AI Briefing.
+// @version      1.6.0
+// @description  A general-purpose dev/diagnostic tool for browser-based games: DOM/element inspection, storage/cookies, traffic (catalog, diffing, waterfall), WebSocket, page timing, script exec, JS console, Token Inspector, Recorder, Event/DOM/Storage watch, Snapshots, Value Tracer, Replay/Edit (sweeps, payload presets, anomaly diff, automation), recon (fingerprint w/ CVE awareness, misconfig, findings), Active Discovery (brute-force, recursive, param fuzzing, crawler), Export/AI Briefing.
 // @author       Tw33k
 // @match        *://*/*
+// @noframes
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
@@ -36,10 +37,12 @@
 (function () {
     'use strict';
 
+    try { if (window.top !== window.self) return; } catch { return; }
+
     const APP = {
         id: 'ttd',
         name: 'Tw33k Tools - Target Data',
-        version: '1.5.1'
+        version: '1.6.0'
     };
 
     const Storage = {
@@ -1999,7 +2002,13 @@
             if (categories.snapshots) data.snapshots = SnapshotManager.all();
             if (categories.fingerprint) data.fingerprint = Recon.fingerprint();
             if (categories.misconfig) data.misconfig = Recon.misconfigAudit();
+            if (categories.graphqlIntrospection) data.graphqlIntrospection = Recon.allGraphQLResults();
             if (categories.findings) data.findings = Findings.gather();
+            if (categories.pathDiscovery) data.pathDiscovery = PageInspectorUI._discoveryLog || [];
+            if (categories.paramDiscovery) {
+                const log = PageInspectorUI._paramDiscoveryLog || [];
+                data.paramDiscovery = log.length ? RequestReplay.detectAnomalies(log) : [];
+            }
             return data;
         },
 
@@ -2183,9 +2192,9 @@
             }
 
             if (categories.fingerprint && data.fingerprint && data.fingerprint.length) {
-                const rows = [this._csvRow(['Name', 'Category', 'Confidence', 'Evidence'])];
+                const rows = [this._csvRow(['Name', 'Category', 'Confidence', 'Version', 'Version Source', 'Evidence'])];
                 data.fingerprint.forEach((f) => {
-                    rows.push(this._csvRow([f.name, f.category, f.confidence, (f.evidence || []).join('; ')]));
+                    rows.push(this._csvRow([f.name, f.category, f.confidence, f.version || '', f.versionSource || '', (f.evidence || []).join('; ')]));
                 });
                 tables.push(`## Tech fingerprint (${data.fingerprint.length})\n${rows.join('\n')}`);
             }
@@ -2196,6 +2205,30 @@
                     rows.push(this._csvRow([f.severity, f.label, f.detail]));
                 });
                 tables.push(`## Misconfig audit (${data.misconfig.length})\n${rows.join('\n')}`);
+            }
+
+            if (categories.graphqlIntrospection && data.graphqlIntrospection && data.graphqlIntrospection.length) {
+                const rows = [this._csvRow(['URL', 'Checked', 'Introspection Enabled', 'Query Type', 'Status', 'Errors Returned', 'Error'])];
+                data.graphqlIntrospection.forEach((r) => {
+                    rows.push(this._csvRow([r.url, r.checkedAt ? new Date(r.checkedAt).toLocaleString() : '', r.ok ? (r.enabled === true ? 'yes' : r.enabled === false ? 'no' : 'inconclusive') : 'check failed', r.queryTypeName || '', r.status ?? '', r.errorsPresent ? 'yes' : 'no', r.error || '']));
+                });
+                tables.push(`## GraphQL introspection checks (${data.graphqlIntrospection.length})\n${rows.join('\n')}`);
+            }
+
+            if (categories.pathDiscovery && data.pathDiscovery && data.pathDiscovery.length) {
+                const rows = [this._csvRow(['Path', 'URL', 'Status', 'Duration (ms)', 'Hit', 'Looks Like Dir', 'Looks Like Listing', 'Error'])];
+                data.pathDiscovery.forEach((l) => {
+                    rows.push(this._csvRow([l.path, l.url, l.status ?? '', l.durationMs ?? '', l.isHit ? 'yes' : 'no', l.looksLikeDir ? 'yes' : 'no', l.looksLikeListing ? 'yes' : 'no', l.error || '']));
+                });
+                tables.push(`## Active Discovery: Path/Endpoint Brute-force results, last run only (${data.pathDiscovery.length})\n${rows.join('\n')}`);
+            }
+
+            if (categories.paramDiscovery && data.paramDiscovery && data.paramDiscovery.length) {
+                const rows = [this._csvRow(['Parameter', 'URL', 'Status', 'Duration (ms)', 'Length', 'Flagged', 'Flag Reasons', 'Error'])];
+                data.paramDiscovery.forEach((l) => {
+                    rows.push(this._csvRow([l.name, l.url, l.status ?? '', l.durationMs ?? '', l.length ?? '', l.anomaly ? 'yes' : 'no', (l.anomalyReasons || []).join('; '), l.error || '']));
+                });
+                tables.push(`## Active Discovery: Hidden Parameter Discovery results, last run only (${data.paramDiscovery.length})\n${rows.join('\n')}`);
             }
 
             if (categories.findings && data.findings && data.findings.length) {
@@ -2415,7 +2448,7 @@
             if (data.fingerprint && data.fingerprint.length) {
                 lines.push(`TECH FINGERPRINT: ${data.fingerprint.length} signature${data.fingerprint.length === 1 ? '' : 's'} matched:`);
                 data.fingerprint.forEach((f) => {
-                    lines.push(`- [${f.confidence}] ${f.name} (${f.category})${f.evidence.length ? ` - ${f.evidence.join('; ')}` : ''}`);
+                    lines.push(`- [${f.confidence}] ${f.name}${f.version ? ` v${f.version}` : ''} (${f.category})${f.evidence.length ? ` - ${f.evidence.join('; ')}` : ''}${f.version ? ` | version via ${f.versionSource}` : ''}`);
                 });
                 lines.push('');
             }
@@ -2428,9 +2461,38 @@
                 lines.push('');
             }
 
+            if (data.graphqlIntrospection && data.graphqlIntrospection.length) {
+                lines.push(`GRAPHQL INTROSPECTION CHECKS: ${data.graphqlIntrospection.length} endpoint${data.graphqlIntrospection.length === 1 ? '' : 's'} checked:`);
+                data.graphqlIntrospection.forEach((r) => {
+                    const outcome = !r.ok ? `check failed - ${r.error || 'unknown error'}` : (r.enabled === true ? `ENABLED (queryType: "${r.queryTypeName}")` : r.enabled === false ? `disabled/blocked${r.errorsPresent ? ' (errors returned)' : ''}` : `inconclusive - response wasn't valid JSON (may not be a real GraphQL endpoint)`);
+                    lines.push(`- ${r.url} - ${outcome}${r.status != null ? ` (status ${r.status})` : ''}`);
+                });
+                lines.push('');
+            }
+
+            if (data.pathDiscovery && data.pathDiscovery.length) {
+                const hits = data.pathDiscovery.filter((l) => l.isHit).length;
+                lines.push(`ACTIVE DISCOVERY - PATH/ENDPOINT BRUTE-FORCE (last run only): ${data.pathDiscovery.length} path${data.pathDiscovery.length === 1 ? '' : 's'} tried, ${hits} hit${hits === 1 ? '' : 's'}:`);
+                data.pathDiscovery.forEach((l) => {
+                    const statusPart = l.ok ? `${l.status}${l.isHit ? ' - hit' : ''}${l.looksLikeDir ? (l.looksLikeListing ? ' - open directory listing' : ' - directory-shaped') : ''}` : `failed - ${l.error}`;
+                    lines.push(`- ${l.path} - ${statusPart}`);
+                });
+                lines.push('');
+            }
+
+            if (data.paramDiscovery && data.paramDiscovery.length) {
+                const flagged = data.paramDiscovery.filter((l) => l.anomaly).length;
+                lines.push(`ACTIVE DISCOVERY - HIDDEN PARAMETER DISCOVERY (last run only): ${data.paramDiscovery.length} parameter${data.paramDiscovery.length === 1 ? '' : 's'} tried, ${flagged} flagged:`);
+                data.paramDiscovery.forEach((l) => {
+                    const statusPart = l.ok ? `${l.status} - ${l.durationMs}ms` : `failed - ${l.error}`;
+                    lines.push(`- ${l.name} - ${statusPart}${l.anomaly ? ` - FLAGGED: ${(l.anomalyReasons || []).join('; ')}` : ''}`);
+                });
+                lines.push('');
+            }
+
             if (data.findings && data.findings.length) {
                 const highCount = data.findings.filter((f) => f.confidence === 'high').length;
-                lines.push(`CONSOLIDATED FINDINGS: ${data.findings.length} total (rolls up fingerprint/misconfig/sweep-anomaly)${highCount ? `, ${highCount} high-confidence` : ''}:`);
+                lines.push(`CONSOLIDATED FINDINGS: ${data.findings.length} total (rolls up fingerprint/misconfig incl. CORS/GraphQL introspection/sweep-anomaly/outdated-library CVE)${highCount ? `, ${highCount} high-confidence` : ''}:`);
                 data.findings.forEach((f) => {
                     lines.push(`- [${f.confidence} - ${f.score}/100] (${f.source}) ${f.label} - ${f.detail}`);
                 });
@@ -4889,7 +4951,52 @@
             { name: 'AWS CloudFront', category: 'Infra/CDN', test: (c) => /cloudfront/i.test(c.headerBlob), evidence: () => ['x-amz-cf-* header seen in traffic'] },
             { name: 'Express (Node.js)', category: 'Server Framework', test: (c) => /express/i.test(c.headerBlob), evidence: () => ['X-Powered-By header seen in traffic'] },
             { name: 'PHP', category: 'Server Language', test: (c) => /php/i.test(c.headerBlob), evidence: () => ['X-Powered-By header seen in traffic'] },
-            { name: 'ASP.NET', category: 'Server Framework', test: (c) => /asp\.net/i.test(c.headerBlob) || c.scriptSrcs.some((s) => /\.aspx(\?|$)/.test(s)), evidence: () => ['X-Powered-By header or .aspx paths'] }
+            { name: 'ASP.NET', category: 'Server Framework', test: (c) => /asp\.net/i.test(c.headerBlob) || c.scriptSrcs.some((s) => /\.aspx(\?|$)/.test(s)), evidence: () => ['X-Powered-By header or .aspx paths'] },
+
+            { name: 'Squarespace', category: 'CMS', test: (c) => c.globals.includes('Squarespace') || c.scriptSrcs.some((s) => /static1\.squarespace\.com/.test(s)),
+              evidence: (c) => [c.globals.includes('Squarespace') && 'window.Squarespace global', c.scriptSrcs.some((s) => /static1\.squarespace\.com/.test(s)) && 'static1.squarespace.com script source'].filter(Boolean) },
+            { name: 'Joomla', category: 'CMS', test: (c) => c.metaGenerator.toLowerCase().includes('joomla') || c.scriptSrcs.some((s) => /\/media\/jui\//.test(s)),
+              evidence: (c) => [c.metaGenerator.toLowerCase().includes('joomla') && 'meta generator tag', c.scriptSrcs.some((s) => /\/media\/jui\//.test(s)) && '/media/jui/ script paths'].filter(Boolean) },
+            { name: 'Magento', category: 'CMS', test: (c) => c.globals.includes('Mage') || c.scriptSrcs.some((s) => /\/skin\/frontend\/|\/static\/frontend\//.test(s)),
+              evidence: (c) => [c.globals.includes('Mage') && 'window.Mage global', c.scriptSrcs.some((s) => /\/skin\/frontend\/|\/static\/frontend\//.test(s)) && 'Magento frontend script paths'].filter(Boolean) },
+            { name: 'Ghost', category: 'CMS', test: (c) => c.metaGenerator.toLowerCase().includes('ghost') || c.scriptSrcs.some((s) => /\/ghost\/api\//.test(s)),
+              evidence: (c) => [c.metaGenerator.toLowerCase().includes('ghost') && 'meta generator tag', c.scriptSrcs.some((s) => /\/ghost\/api\//.test(s)) && '/ghost/api/ script paths'].filter(Boolean) },
+
+            { name: 'Backbone.js', category: 'JS Library', test: (c) => c.globals.includes('Backbone'), evidence: () => ['window.Backbone global'] },
+            { name: 'D3.js', category: 'JS Library', test: (c) => c.globals.includes('d3'), evidence: () => ['window.d3 global'] },
+            { name: 'Three.js', category: 'JS Library', test: (c) => c.globals.includes('THREE'), evidence: () => ['window.THREE global'] },
+            { name: 'Moment.js', category: 'JS Library', test: (c) => c.globals.includes('moment'), evidence: () => ['window.moment global'] },
+            { name: 'Axios', category: 'JS Library', test: (c) => c.globals.includes('axios'), evidence: () => ['window.axios global'] },
+            { name: 'Chart.js', category: 'JS Library', test: (c) => c.globals.includes('Chart'), evidence: () => ['window.Chart global'] },
+
+            { name: 'Material-UI (MUI)', category: 'CSS Framework', test: (c) => /\bMui[A-Z]\w*-root\b/.test(c.html), evidence: () => ['Mui*-root class names in markup'] },
+            { name: 'Ant Design', category: 'CSS Framework', test: (c) => /\bant-(btn|layout|menu|table)\b/.test(c.html), evidence: () => ['ant-* class names in markup'] },
+
+            { name: 'Mixpanel', category: 'Analytics', test: (c) => c.globals.includes('mixpanel'), evidence: () => ['window.mixpanel global'] },
+            { name: 'Amplitude', category: 'Analytics', test: (c) => c.globals.includes('amplitude'), evidence: () => ['window.amplitude global'] },
+            { name: 'Heap Analytics', category: 'Analytics', test: (c) => c.globals.includes('heap'), evidence: () => ['window.heap global'] },
+            { name: 'Intercom', category: 'Analytics', test: (c) => c.globals.includes('Intercom'), evidence: () => ['window.Intercom global'] },
+
+            { name: 'LogRocket', category: 'Monitoring', test: (c) => c.globals.includes('LogRocket'), evidence: () => ['window.LogRocket global'] },
+            { name: 'Datadog RUM', category: 'Monitoring', test: (c) => c.globals.includes('DD_RUM'), evidence: () => ['window.DD_RUM global'] },
+            { name: 'New Relic', category: 'Monitoring', test: (c) => c.globals.includes('NREUM'), evidence: () => ['window.NREUM global'] },
+            { name: 'Bugsnag', category: 'Monitoring', test: (c) => c.globals.includes('Bugsnag'), evidence: () => ['window.Bugsnag global'] },
+
+            { name: 'PayPal', category: 'Payments', test: (c) => c.globals.includes('paypal') || c.scriptSrcs.some((s) => /paypal\.com\/sdk/.test(s)),
+              evidence: (c) => [c.globals.includes('paypal') && 'window.paypal global', c.scriptSrcs.some((s) => /paypal\.com\/sdk/.test(s)) && 'paypal.com/sdk script source'].filter(Boolean) },
+            { name: 'Braintree', category: 'Payments', test: (c) => c.globals.includes('braintree'), evidence: () => ['window.braintree global'] },
+
+            { name: 'Fastly', category: 'Infra/CDN', test: (c) => /fastly/i.test(c.headerBlob), evidence: () => ['Server/X-Served-By header seen in traffic'] },
+            { name: 'Akamai', category: 'Infra/CDN', test: (c) => /akamai/i.test(c.headerBlob), evidence: () => ['header signature seen in traffic'] },
+            { name: 'Netlify', category: 'Infra/CDN', test: (c) => /netlify/i.test(c.headerBlob), evidence: () => ['Server/X-Nf-* header seen in traffic'] },
+            { name: 'Microsoft IIS', category: 'Infra/CDN', test: (c) => /microsoft-iis/i.test(c.headerBlob), evidence: () => ['Server header seen in traffic'] },
+
+            { name: 'Laravel', category: 'Server Framework', test: (c) => c.cookieNames.some((n) => /^laravel_session$/i.test(n)) || c.cookieNames.some((n) => /^XSRF-TOKEN$/i.test(n)),
+              evidence: (c) => [c.cookieNames.some((n) => /^laravel_session$/i.test(n)) && 'laravel_session cookie', c.cookieNames.some((n) => /^XSRF-TOKEN$/i.test(n)) && 'XSRF-TOKEN cookie'].filter(Boolean) },
+            { name: 'Django', category: 'Server Framework', test: (c) => c.cookieNames.some((n) => n.toLowerCase() === 'csrftoken'),
+              evidence: () => ['csrftoken cookie'] },
+            { name: 'Ruby on Rails', category: 'Server Framework', test: (c) => /x-runtime/i.test(c.headerBlob) || c.cookieNames.some((n) => /_session$/i.test(n)),
+              evidence: (c) => [/x-runtime/i.test(c.headerBlob) && 'X-Runtime header seen in traffic', c.cookieNames.some((n) => /_session$/i.test(n)) && 'Rails-style *_session cookie'].filter(Boolean) }
         ],
 
         _buildContext() {
@@ -4904,14 +5011,18 @@
             ['React', '__REACT_DEVTOOLS_GLOBAL_HOOK__', 'Vue', '__VUE__', '__NUXT__', 'ng', 'getAllAngularRootElements',
              'jQuery', '$', 'Ember', 'Alpine', 'htmx', '_', '__REDUX_DEVTOOLS_EXTENSION__', 'bootstrap', 'gtag', 'ga',
              'dataLayer', 'fbq', 'Sentry', 'Raven', 'analytics', 'hj', 'grecaptcha', 'hcaptcha', 'turnstile', 'Stripe',
-             'Shopify', 'Drupal', 'wp'].forEach((name) => {
+             'Shopify', 'Drupal', 'wp', 'Squarespace', 'Mage', 'Backbone', 'd3', 'THREE', 'moment', 'axios', 'Chart',
+             'mixpanel', 'amplitude', 'heap', 'Intercom', 'LogRocket', 'DD_RUM', 'NREUM', 'Bugsnag', 'paypal', 'braintree'
+            ].forEach((name) => {
                 try { if (typeof realWindow[name] !== 'undefined') globals.push(name); } catch {  }
             });
             const headerBlob = ObservedTraffic.all().slice(0, 200).map((e) => {
                 const h = e.responseHeaders || {};
                 return Object.keys(h).map((k) => `${k}: ${h[k]}`).join(' ');
-            }).join(' ');
-            return { scriptSrcs, metaGenerator, html, globals, headerBlob };
+            }).concat(this._pageHeaders ? Object.keys(this._pageHeaders).map((k) => `${k}: ${this._pageHeaders[k]}`) : []).join(' ');
+            let cookieNames = [];
+            try { cookieNames = PageInspector.getCookies().map((c) => c.key); } catch {  }
+            return { scriptSrcs, metaGenerator, html, globals, headerBlob, cookieNames };
         },
 
         _GLOBAL_LOCATE: {
@@ -4919,7 +5030,12 @@
             'Ember.js': 'Ember', 'Alpine.js': 'Alpine', 'htmx': 'htmx', 'Redux': '__REDUX_DEVTOOLS_EXTENSION__',
             'Google Analytics / GA4': 'gtag', 'Meta/Facebook Pixel': 'fbq', 'Sentry': 'Sentry', 'Shopify': 'Shopify',
             'Drupal': 'Drupal', 'WordPress': 'wp', 'Hotjar': 'hj', 'reCAPTCHA': 'grecaptcha', 'hCaptcha': 'hcaptcha',
-            'Cloudflare Turnstile': 'turnstile', 'Stripe': 'Stripe', 'Bootstrap': 'bootstrap', 'Lodash': '_'
+            'Cloudflare Turnstile': 'turnstile', 'Stripe': 'Stripe', 'Bootstrap': 'bootstrap', 'Lodash': '_',
+            'Squarespace': 'Squarespace', 'Magento': 'Mage', 'Backbone.js': 'Backbone', 'D3.js': 'd3',
+            'Three.js': 'THREE', 'Moment.js': 'moment', 'Axios': 'axios', 'Chart.js': 'Chart',
+            'Mixpanel': 'mixpanel', 'Amplitude': 'amplitude', 'Heap Analytics': 'heap', 'Intercom': 'Intercom',
+            'LogRocket': 'LogRocket', 'Datadog RUM': 'DD_RUM', 'New Relic': 'NREUM', 'Bugsnag': 'Bugsnag',
+            'PayPal': 'paypal', 'Braintree': 'braintree'
         },
         _SCRIPT_LOCATE: {
             'WordPress': /\/wp-content\/|\/wp-includes\//, 'Shopify': /cdn\.shopify\.com/,
@@ -4927,12 +5043,25 @@
             'Lodash': /lodash/, 'Bootstrap': /bootstrap/, 'Google Tag Manager': /googletagmanager\.com/,
             'Segment': /cdn\.segment\.com/, 'Hotjar': /static\.hotjar\.com/, 'reCAPTCHA': /recaptcha/,
             'hCaptcha': /hcaptcha\.com/, 'Cloudflare Turnstile': /challenges\.cloudflare\.com/,
-            'Stripe': /js\.stripe\.com/, 'ASP.NET': /\.aspx(\?|$)/
+            'Stripe': /js\.stripe\.com/, 'ASP.NET': /\.aspx(\?|$)/,
+            'Squarespace': /static1\.squarespace\.com/, 'Joomla': /\/media\/jui\//,
+            'Magento': /\/skin\/frontend\/|\/static\/frontend\//, 'Ghost': /\/ghost\/api\//,
+            'PayPal': /paypal\.com\/sdk/
         },
-        _HEADER_LOCATE: new Set(['Cloudflare', 'nginx', 'Apache', 'Vercel', 'AWS CloudFront', 'Express (Node.js)', 'PHP', 'ASP.NET']),
+        _HEADER_LOCATE: new Set(['Cloudflare', 'nginx', 'Apache', 'Vercel', 'AWS CloudFront', 'Express (Node.js)', 'PHP', 'ASP.NET',
+            'Fastly', 'Akamai', 'Netlify', 'Microsoft IIS', 'Ruby on Rails']),
+        _COOKIE_LOCATE: {
+            'Laravel': ['laravel_session', 'XSRF-TOKEN'],
+            'Django': ['csrftoken']
+        },
 
         _locateForHit(ctx, name) {
             if (this._HEADER_LOCATE.has(name)) return { kind: 'headers' };
+            const cookieCandidates = this._COOKIE_LOCATE[name];
+            if (cookieCandidates) {
+                const match = ctx.cookieNames.find((n) => cookieCandidates.some((c) => c.toLowerCase() === n.toLowerCase()));
+                if (match) return { kind: 'cookie', key: match };
+            }
             const scriptRe = this._SCRIPT_LOCATE[name];
             if (scriptRe) {
                 const match = ctx.scriptSrcs.find((s) => scriptRe.test(s));
@@ -4941,6 +5070,123 @@
             const g = this._GLOBAL_LOCATE[name];
             if (g && ctx.globals.includes(g)) return { kind: 'global', key: g };
             return { kind: 'dom' };
+        },
+
+        VERSION_EXTRACTORS: {
+            'WordPress': (ctx) => {
+                let m = ctx.metaGenerator.match(/WordPress\s+([\d.]+)/i);
+                if (m) return { version: m[1], source: 'meta generator tag' };
+                const hit = ctx.scriptSrcs.find((s) => /\/wp-includes\/|\/wp-content\//.test(s) && /[?&]ver=([\d.]+)/i.test(s));
+                if (hit) { m = hit.match(/[?&]ver=([\d.]+)/i); if (m) return { version: m[1], source: 'wp script ver= query param' }; }
+                return null;
+            },
+            'Drupal': (ctx) => {
+                const m = ctx.metaGenerator.match(/Drupal\s+([\d.]+)/i);
+                return m ? { version: m[1], source: 'meta generator tag' } : null;
+            },
+            'jQuery': (ctx) => {
+                let hit = ctx.scriptSrcs.find((s) => /jquery[.-](\d+\.\d+\.\d+)/i.test(s));
+                if (hit) { const m = hit.match(/jquery[.-](\d+\.\d+\.\d+)/i); if (m) return { version: m[1], source: 'jquery script filename' }; }
+                hit = ctx.scriptSrcs.find((s) => /jquery/i.test(s) && /[?&]ver=([\d.]+)/i.test(s));
+                if (hit) { const m = hit.match(/[?&]ver=([\d.]+)/i); if (m) return { version: m[1], source: 'jquery script ver= query param' }; }
+                try {
+                    const rw = (typeof getRealWindow === 'function') ? getRealWindow() : window;
+                    if (rw.jQuery && rw.jQuery.fn && rw.jQuery.fn.jquery) return { version: rw.jQuery.fn.jquery, source: 'window.jQuery.fn.jquery' };
+                } catch {  }
+                return null;
+            },
+            'React': (ctx) => {
+                try {
+                    const rw = (typeof getRealWindow === 'function') ? getRealWindow() : window;
+                    if (rw.React && rw.React.version) return { version: rw.React.version, source: 'window.React.version' };
+                } catch {  }
+                return null;
+            },
+            'Vue.js': (ctx) => {
+                try {
+                    const rw = (typeof getRealWindow === 'function') ? getRealWindow() : window;
+                    if (rw.Vue && rw.Vue.version) return { version: rw.Vue.version, source: 'window.Vue.version' };
+                } catch {  }
+                return null;
+            },
+            'Angular': (ctx) => {
+                const m = ctx.html.match(/ng-version="([\d.]+)"/i);
+                return m ? { version: m[1], source: 'ng-version attribute' } : null;
+            },
+            'Bootstrap': (ctx) => {
+                const hit = ctx.scriptSrcs.find((s) => /bootstrap[@/-]v?(\d+\.\d+\.\d+)/i.test(s));
+                if (hit) { const m = hit.match(/bootstrap[@/-]v?(\d+\.\d+\.\d+)/i); if (m) return { version: m[1], source: 'bootstrap script filename/path' }; }
+                return null;
+            },
+            'PHP': (ctx) => {
+                const m = ctx.headerBlob.match(/PHP\/([\d.]+)/i);
+                return m ? { version: m[1], source: 'X-Powered-By header' } : null;
+            },
+            'nginx': (ctx) => {
+                const m = ctx.headerBlob.match(/nginx\/([\d.]+)/i);
+                return m ? { version: m[1], source: 'Server header' } : null;
+            },
+            'Apache': (ctx) => {
+                const m = ctx.headerBlob.match(/Apache\/([\d.]+)/i);
+                return m ? { version: m[1], source: 'Server header' } : null;
+            },
+            'ASP.NET': (ctx) => {
+                const m = ctx.headerBlob.match(/X-AspNet(?:Mvc)?-Version:\s*([\d.]+)/i) || ctx.headerBlob.match(/ASP\.NET\/([\d.]+)/i);
+                return m ? { version: m[1], source: 'X-AspNet(Mvc)-Version header' } : null;
+            },
+            'Express (Node.js)': (ctx) => {
+                const m = ctx.headerBlob.match(/Express\/([\d.]+)/i);
+                return m ? { version: m[1], source: 'X-Powered-By header' } : null;
+            }
+        },
+
+        _extractVersion(name, ctx) {
+            const fn = this.VERSION_EXTRACTORS[name];
+            if (!fn) return null;
+            try { return fn(ctx) || null; } catch { return null; }
+        },
+
+        compareVersions(a, b) {
+            const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
+            const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0);
+            const len = Math.max(pa.length, pb.length);
+            for (let i = 0; i < len; i++) {
+                const x = pa[i] || 0, y = pb[i] || 0;
+                if (x !== y) return x < y ? -1 : 1;
+            }
+            return 0;
+        },
+
+        // Small curated reference of well-known public CVEs for outdated versions of libraries this tool
+        // already fingerprints. Informational only - identifiers and disclosure dates only, no PoC/payload.
+        // belowVersion: flagged if detected version is strictly below this. atLeastVersion (optional): only
+        // flagged if detected version is also >= this, for scoping a fix that only applies to one major branch.
+        CVE_REFERENCE: {
+            'jQuery': [
+                { belowVersion: '3.0.0', cves: ['CVE-2015-9251'], disclosed: '2015-01-30', note: 'cross-domain ajax() responses executed as script (XSS)' },
+                { belowVersion: '3.4.0', cves: ['CVE-2019-11358'], disclosed: '2019-04-01', note: 'prototype pollution via jQuery.extend(true, ...)' },
+                { belowVersion: '3.5.0', cves: ['CVE-2020-11022', 'CVE-2020-11023'], disclosed: '2020-04-29', note: 'XSS via jQuery.htmlPrefilter() on untrusted HTML' }
+            ],
+            'Bootstrap': [
+                { belowVersion: '4.1.2', cves: ['CVE-2018-14040', 'CVE-2018-14041', 'CVE-2018-14042'], disclosed: '2018-08-16', note: 'XSS via data-target/data-container/collapse data-parent attributes' }
+            ],
+            'WordPress': [
+                { belowVersion: '4.7.2', cves: ['CVE-2017-1001000'], disclosed: '2017-02-01', note: 'REST API content injection via privilege-check bypass' }
+            ],
+            'Drupal': [
+                { belowVersion: '7.58', atLeastVersion: '7.0', cves: ['CVE-2018-7600'], disclosed: '2018-03-28', note: '"Drupalgeddon2" - unauthenticated remote code execution' },
+                { belowVersion: '8.5.1', atLeastVersion: '8.0', cves: ['CVE-2018-7600'], disclosed: '2018-03-28', note: '"Drupalgeddon2" - unauthenticated remote code execution' }
+            ]
+        },
+
+        getCveMatches(name, version) {
+            const entries = this.CVE_REFERENCE[name];
+            if (!entries || !version) return [];
+            return entries.filter((e) => {
+                const belowOk = this.compareVersions(version, e.belowVersion) < 0;
+                const atLeastOk = e.atLeastVersion ? this.compareVersions(version, e.atLeastVersion) >= 0 : true;
+                return belowOk && atLeastOk;
+            });
         },
 
         fingerprint(force) {
@@ -4954,7 +5200,15 @@
                 let evidence = [];
                 try { evidence = sig.evidence(ctx) || []; } catch {  }
                 const confidence = evidence.length >= 2 ? 'high' : (evidence.length === 1 ? 'medium' : 'low');
-                hits.push({ name: sig.name, category: sig.category, confidence, evidence, locate: this._locateForHit(ctx, sig.name) });
+                const versionInfo = this._extractVersion(sig.name, ctx);
+                const cves = versionInfo ? this.getCveMatches(sig.name, versionInfo.version) : [];
+                hits.push({
+                    name: sig.name, category: sig.category, confidence, evidence,
+                    locate: this._locateForHit(ctx, sig.name),
+                    version: versionInfo ? versionInfo.version : null,
+                    versionSource: versionInfo ? versionInfo.source : null,
+                    cves
+                });
             });
             hits.sort((a, b) => {
                 const order = { high: 0, medium: 1, low: 2 };
@@ -5052,10 +5306,95 @@
                 });
             });
 
+            const seenCors = new Set();
+            ObservedTraffic.all().forEach((entry) => {
+                const rh = entry.responseHeaders || {};
+                const acao = ObservedTraffic.getHeader(rh, 'access-control-allow-origin');
+                if (!acao) return;
+                const acacRaw = ObservedTraffic.getHeader(rh, 'access-control-allow-credentials');
+                const acac = (acacRaw || '').trim().toLowerCase() === 'true';
+                const reqOrigin = ObservedTraffic.getHeader(entry.requestHeaders || {}, 'origin');
+                const dedupeKey = `${acao}\u0000${acac}\u0000${entry.url}`;
+                if (seenCors.has(dedupeKey)) return;
+
+                if (acao === '*' && acac) {
+                    seenCors.add(dedupeKey);
+                    findings.push({ kind: 'cors', severity: 'high', label: 'CORS: wildcard origin with credentials allowed', detail: `${entry.method} ${Helpers._shortenUrl(entry.url)} sent Access-Control-Allow-Origin: * together with Access-Control-Allow-Credentials: true. Browsers reject that exact combination outright, but a server sending it is a strong signal it may reflect whatever Origin it receives instead of a real allowlist - worth checking directly from another origin.`, locate: { kind: 'traffic', url: entry.url } });
+                } else if (acao.toLowerCase() === 'null' && acac) {
+                    seenCors.add(dedupeKey);
+                    findings.push({ kind: 'cors', severity: 'high', label: 'CORS: "null" origin allowed with credentials', detail: `${entry.method} ${Helpers._shortenUrl(entry.url)} allows Access-Control-Allow-Origin: null together with credentials. The "null" origin can be triggered from a sandboxed iframe or a local file, making this a known bypass path for credentialed cross-origin reads.`, locate: { kind: 'traffic', url: entry.url } });
+                } else if (acac && acao !== '*' && reqOrigin && acao.toLowerCase() === reqOrigin.toLowerCase()) {
+                    seenCors.add(dedupeKey);
+                    findings.push({ kind: 'cors', severity: 'medium', label: 'CORS: request origin reflected with credentials allowed', detail: `${entry.method} ${Helpers._shortenUrl(entry.url)} echoed the exact Origin it received (${acao}) back in Access-Control-Allow-Origin, with credentials allowed. Consistent with reflecting any Origin rather than checking a fixed allowlist, which would let any site read this response using the user's session - but a passive read of one request can't tell reflection apart from a legitimate single-partner allowlist that happens to match. Confirm by re-requesting from a different origin.`, locate: { kind: 'traffic', url: entry.url } });
+                }
+            });
+
             const order = { high: 0, medium: 1, low: 2, info: 3 };
             findings.sort((a, b) => order[a.severity] - order[b.severity]);
             this._misconfigCache = findings;
             return findings;
+        },
+
+        GRAPHQL_INTROSPECTION_QUERY: '{__schema{queryType{name}}}',
+        _graphqlResults: {},
+
+        cataloggedGraphQLEndpoints() {
+            return ObservedTraffic.catalogEntries().filter((c) => /graphql/i.test(c.pathPattern) || /graphql/i.test(c.exampleUrl || ''));
+        },
+
+        getGraphQLResult(url) {
+            return this._graphqlResults[url] || null;
+        },
+
+        allGraphQLResults() {
+            return Object.keys(this._graphqlResults).map((url) => ({ url, ...this._graphqlResults[url] }));
+        },
+
+        async checkGraphQLIntrospection(url, mode) {
+            const draft = { method: 'POST', url, headersText: 'Content-Type: application/json', body: JSON.stringify({ query: this.GRAPHQL_INTROSPECTION_QUERY }) };
+            const result = await RequestReplay.sendWithMode(draft, mode);
+
+            let enabled = null;
+            let queryTypeName = null;
+            let errorsPresent = false;
+            if (result.ok && result.json) {
+                try { queryTypeName = (result.json.data && result.json.data.__schema && result.json.data.__schema.queryType && result.json.data.__schema.queryType.name) || null; } catch {  }
+                enabled = !!queryTypeName;
+                errorsPresent = !!(result.json.errors && result.json.errors.length);
+            }
+
+            const bodyText = result.ok ? (result.rawText || (result.json ? (() => { try { return JSON.stringify(result.json); } catch { return ''; } })() : '') || '') : '';
+            ObservedTraffic.record({
+                transport: 'discovery',
+                origin: { label: 'GraphQL Introspection Check', confidence: 'stack' },
+                originStackDebug: null,
+                method: 'POST',
+                url,
+                status: result.ok ? result.status : null,
+                contentType: result.ok ? (ObservedTraffic.getHeader(result.responseHeaders, 'content-type') || '') : '',
+                requestHeaders: { 'Content-Type': 'application/json' },
+                responseHeaders: result.ok ? (result.responseHeaders || {}) : {},
+                requestBody: draft.body,
+                size: bodyText.length,
+                durationMs: result.durationMs || 0,
+                timestamp: Date.now(),
+                recordingSession: InvestigationRecorder.isRecording() ? InvestigationRecorder._recordingStartedAt : null,
+                json: result.ok ? (result.json || null) : null,
+                rawText: result.ok && !result.json ? bodyText.slice(0, 4000) : null
+            });
+
+            const outcome = {
+                ok: result.ok,
+                enabled,
+                queryTypeName,
+                errorsPresent,
+                status: result.ok ? result.status : null,
+                error: result.ok ? null : result.error,
+                durationMs: result.durationMs,
+                checkedAt: Date.now()
+            };
+            this._graphqlResults[url] = outcome;
+            return outcome;
         }
     };
 
@@ -5065,6 +5404,7 @@
         MISCONFIG_SEVERITY_SCORE: { high: 85, medium: 60, low: 35, info: 15 },
         FINGERPRINT_CONFIDENCE_SCORE: { high: 75, medium: 50, low: 25 },
         SWEEP_REASON_WEIGHT: { 'error-signature': 40, status: 25, timing: 20, length: 15, failed: 30 },
+        CVE_FINDING_SCORE: 80,
 
         _scoreToBucket(score) {
             if (score >= 70) return 'high';
@@ -5104,12 +5444,25 @@
                 findings.push({
                     source: 'fingerprint',
                     kind: 'tech',
-                    label: `Tech detected: ${f.name} (${f.category})`,
+                    label: `Tech detected: ${f.name}${f.version ? ` v${f.version}` : ''} (${f.category})`,
                     detail: (f.evidence || []).join('; ') || 'Signature matched with no captured evidence detail.',
                     score,
                     confidence: this._scoreToBucket(score),
                     severity: 'info',
                     locate: f.locate
+                });
+                (f.cves || []).forEach((c) => {
+                    const cveScore = this.CVE_FINDING_SCORE;
+                    findings.push({
+                        source: 'cve',
+                        kind: 'outdated-library-cve',
+                        label: `Known CVE for outdated ${f.name} ${f.version}: ${c.cves.join('/')}`,
+                        detail: `${c.note} (disclosed ${c.disclosed}). Detected version ${f.version} is below the patched version ${c.belowVersion}${c.atLeastVersion ? `, within the ${c.atLeastVersion}.x+ branch this fix applies to` : ''}. Version detected via ${f.versionSource} - informational reference only, not a confirmed exploit.`,
+                        score: cveScore,
+                        confidence: this._scoreToBucket(cveScore),
+                        severity: 'high',
+                        locate: f.locate
+                    });
                 });
             });
 
@@ -5126,6 +5479,21 @@
                     severity: this._scoreToBucket(score),
                     locate: { kind: 'replayHistory', historyEntryId: e.id },
                     meta: { method: e.draft.method, url: e.draft.url, value: e.sweep.value, timestamp: e.timestamp }
+                });
+            });
+
+            Recon.allGraphQLResults().forEach((r) => {
+                if (!r.ok || !r.enabled) return;
+                const score = this.MISCONFIG_SEVERITY_SCORE.medium;
+                findings.push({
+                    source: 'graphql',
+                    kind: 'graphql-introspection',
+                    label: `GraphQL introspection enabled: ${Helpers._shortenUrl(r.url)}`,
+                    detail: `Introspection query returned a schema root type ("${r.queryTypeName}"), meaning the full schema (queries, mutations, types, fields) is very likely enumerable by anyone who can reach this endpoint. This check only requested the root type name, not the full schema.`,
+                    score,
+                    confidence: this._scoreToBucket(score),
+                    severity: 'medium',
+                    locate: { kind: 'traffic', url: r.url }
                 });
             });
 
@@ -5415,6 +5783,117 @@
                 .filter(Boolean);
         },
 
+        CMS_PLUGIN_SLUGS: {
+            wordpress: [
+                'akismet', 'jetpack', 'contact-form-7', 'wordpress-seo', 'woocommerce', 'elementor', 'wordfence',
+                'wp-super-cache', 'w3-total-cache', 'wp-fastest-cache', 'all-in-one-seo-pack', 'classic-editor',
+                'wp-optimize', 'updraftplus', 'duplicate-post', 'really-simple-ssl', 'ninja-forms', 'wpforms-lite',
+                'mailchimp-for-wp', 'google-analytics-for-wordpress', 'wp-mail-smtp', 'advanced-custom-fields',
+                'custom-post-type-ui', 'redirection', 'regenerate-thumbnails', 'wp-smushit', 'autoptimize',
+                'litespeed-cache', 'sucuri-scanner', 'better-wp-security', 'loginizer', 'limit-login-attempts-reloaded',
+                'sitepress-multilingual-cms', 'polylang', 'gravityforms', 'revslider', 'js_composer',
+                'woocommerce-gateway-stripe', 'woocommerce-paypal-payments', 'elementor-pro',
+                'beaver-builder-lite-version', 'wp-rocket', 'wp-file-manager', 'wp-google-maps', 'tablepress',
+                'the-events-calendar', 'contact-form-plugin', 'wp-user-avatar', 'multiple-page-generator-plugin'
+            ],
+            drupal: [
+                'views', 'ctools', 'token', 'pathauto', 'admin_menu', 'webform', 'features', 'panels', 'date',
+                'entity', 'wysiwyg', 'ckeditor', 'imce', 'media', 'file_entity', 'libraries', 'jquery_update',
+                'rules', 'views_bulk_operations', 'devel', 'backup_migrate', 'captcha', 'recaptcha', 'honeypot',
+                'metatag', 'pathologic', 'redirect', 'globalredirect', 'google_analytics', 'simplenews',
+                'mailchimp', 'feeds', 'migrate', 'panelizer', 'context', 'boxes', 'menu_block', 'superfish',
+                'colorbox', 'fancybox', 'views_slideshow', 'flag', 'og', 'organic_groups', 'field_group',
+                'link', 'l10n_update', 'shortcode', 'smtp'
+            ],
+            joomla: [
+                'contact', 'search', 'banners', 'weblinks', 'tags', 'fields', 'finder', 'fabrik', 'jcomments',
+                'kunena', 'community', 'easyblog', 'easysocial', 'virtuemart', 'hikashop', 'jshopping', 'k2',
+                'sh404sef', 'akeeba', 'phocagallery', 'phocadownload', 'acymailing', 'breezingforms', 'rsform',
+                'jevents', 'eventgallery', 'jomsocial', 'simplediscuss', 'jdownloads', 'docman', 'xmap',
+                'jomcomment', 'sobipro', 'flexicontent', 'zoo', 'seblod', 'jotloader'
+            ]
+        },
+
+        CMS_PATH_TEMPLATES: {
+            wordpress: [
+                '/wp-content/plugins/{slug}/', '/wp-content/plugins/{slug}/readme.txt',
+                '/wp-content/themes/{slug}/', '/wp-content/themes/{slug}/style.css'
+            ],
+            drupal: [
+                '/sites/all/modules/{slug}/', '/sites/all/modules/{slug}/{slug}.info',
+                '/modules/{slug}/', '/modules/{slug}/{slug}.info',
+                '/sites/all/themes/{slug}/', '/themes/{slug}/'
+            ],
+            joomla: [
+                '/components/com_{slug}/', '/modules/mod_{slug}/', '/plugins/system/{slug}/',
+                '/administrator/components/com_{slug}/'
+            ]
+        },
+
+        CMS_PRESET_META: {
+            wordpress: { label: 'WordPress plugin/theme slugs' },
+            drupal: { label: 'Drupal module/theme slugs' },
+            joomla: { label: 'Joomla component/module slugs' }
+        },
+
+        buildCmsWordlist(cms) {
+            const slugs = this.CMS_PLUGIN_SLUGS[cms] || [];
+            const templates = this.CMS_PATH_TEMPLATES[cms] || [];
+            const seen = new Set();
+            const out = [];
+            slugs.forEach((slug) => {
+                templates.forEach((tmpl) => {
+                    const path = tmpl.replace(/\{slug\}/g, slug);
+                    if (!seen.has(path)) { seen.add(path); out.push(path); }
+                });
+            });
+            return out;
+        },
+
+        getCmsWordlistPreset(key) {
+            const meta = this.CMS_PRESET_META[key];
+            if (!meta) return null;
+            return { label: meta.label, values: this.buildCmsWordlist(key) };
+        },
+
+        parseRobotsTxt(text) {
+            const paths = [];
+            const sitemaps = [];
+            (text || '').split(/\r?\n/).forEach((line) => {
+                const clean = line.split('#')[0].trim();
+                if (!clean) return;
+                const pathMatch = clean.match(/^(disallow|allow)\s*:\s*(\S*)/i);
+                if (pathMatch) {
+                    const val = pathMatch[2].trim();
+                    if (val) paths.push({ value: val, kind: pathMatch[1].toLowerCase() });
+                    return;
+                }
+                const sitemapMatch = clean.match(/^sitemap\s*:\s*(\S+)/i);
+                if (sitemapMatch) sitemaps.push(sitemapMatch[1].trim());
+            });
+            const seenPaths = new Set();
+            const dedupedPaths = paths.filter((p) => {
+                const key = `${p.kind}\u0000${p.value}`;
+                if (seenPaths.has(key)) return false;
+                seenPaths.add(key);
+                return true;
+            });
+            return { paths: dedupedPaths, sitemaps: Array.from(new Set(sitemaps)) };
+        },
+
+        parseSitemapXml(text) {
+            const locs = [];
+            try {
+                const doc = new DOMParser().parseFromString(text || '', 'text/xml');
+                if (doc.querySelector('parsererror')) return locs;
+                doc.querySelectorAll('loc').forEach((el) => {
+                    const v = (el.textContent || '').trim();
+                    if (v) locs.push(v);
+                });
+            } catch {  }
+            return Array.from(new Set(locs));
+        },
+
         WORDLIST_STORAGE_KEY: 'ttd_discovery_wordlists',
 
         loadSavedWordlists() {
@@ -5482,10 +5961,64 @@
                 const doSend = async () => {
                     if (stopped) { callbacks.onDone && callbacks.onDone(true); return; }
                     const url = this._joinUrl(baseUrl, path);
+                    callbacks.onStart && callbacks.onStart(stepIndex, path, url, paths.length);
                     const result = await RequestReplay.sendWithMode({ method: 'GET', url, headersText: '', body: '' }, mode);
                     const isHit = result.ok && result.status !== 404;
                     if (isHit) this._recordEntry(url, 'GET', result);
                     callbacks.onStep && callbacks.onStep(stepIndex, path, url, result, isHit);
+                    runNext();
+                };
+
+                if (stepIndex === 0) doSend();
+                else setTimeout(doSend, wait);
+            };
+
+            runNext();
+            return { stop() { stopped = true; } };
+        },
+
+        DEFAULT_PARAM_WORDLIST: [
+            'debug', 'test', 'admin', 'is_admin', 'admin_only', 'internal', 'private', 'hidden',
+            'api_key', 'apikey', 'access_token', 'token', 'auth', 'authtoken', 'session', 'sessionid',
+            'callback', 'jsonp', 'redirect', 'redirect_uri', 'return', 'return_url', 'returnUrl', 'next',
+            'url', 'dest', 'destination', 'continue', 'target', 'path', 'file', 'page', 'view',
+            'id', 'user', 'username', 'uid', 'role', 'preview', 'draft', 'format', 'output', 'type',
+            'cmd', 'exec', 'action', 'mode', 'env', 'environment', 'config', 'source', 'src', 'ref',
+            'referrer', 'lang', 'locale', 'version', 'ver', 'cache', 'nocache', 'no_cache', 'bypass',
+            'override', 'force', 'unsafe', 'filter', 'sort', 'order', 'limit', 'offset', 'include',
+            'exclude', 'fields', 'expand', 'verbose', 'trace', 'log', 'logging', 'raw', 'export'
+        ],
+
+        appendQueryParam(url, name, value) {
+            try {
+                const u = new URL(url);
+                u.searchParams.append(name, value);
+                return u.toString();
+            } catch {
+                const sep = url.includes('?') ? '&' : '?';
+                return `${url}${sep}${encodeURIComponent(name)}=${encodeURIComponent(value)}`;
+            }
+        },
+
+        runParamDiscovery(targetUrl, paramNames, delayMs, mode, callbacks) {
+            callbacks = callbacks || {};
+            let stopped = false;
+            let idx = 0;
+            const wait = Math.max(this.MIN_DELAY_MS, Number(delayMs) || 0);
+
+            const runNext = () => {
+                if (stopped) { callbacks.onDone && callbacks.onDone(true); return; }
+                if (idx >= paramNames.length) { callbacks.onDone && callbacks.onDone(false); return; }
+                const name = paramNames[idx];
+                const stepIndex = idx;
+                idx++;
+
+                const doSend = async () => {
+                    if (stopped) { callbacks.onDone && callbacks.onDone(true); return; }
+                    const url = this.appendQueryParam(targetUrl, name, '1');
+                    callbacks.onStart && callbacks.onStart(stepIndex, name, url, paramNames.length);
+                    const result = await RequestReplay.sendWithMode({ method: 'GET', url, headersText: '', body: '' }, mode);
+                    callbacks.onStep && callbacks.onStep(stepIndex, name, url, result);
                     runNext();
                 };
 
@@ -5716,7 +6249,7 @@
         _tokenVaultLabel: '',
         _tokenOccurrences: null,
         _tokenPayloadTreeState: null,
-        _exportCategories: { traffic: true, catalog: true, persistedTraffic: true, recorder: true, element: true, pageTiming: true, websocket: true, traceHistory: true, replay: true, replayHistory: true, sandboxRun: true, sandboxHistory: true, domSnapshot: true, eventDebugLog: true, domMutationLog: true, storageWatchLog: true, wsMessageCatalog: true, snapshots: true, tokenVault: false, storageVault: false, fingerprint: true, misconfig: true, findings: true },
+        _exportCategories: { traffic: true, catalog: true, persistedTraffic: true, recorder: true, element: true, pageTiming: true, websocket: true, traceHistory: true, replay: true, replayHistory: true, sandboxRun: true, sandboxHistory: true, domSnapshot: true, eventDebugLog: true, domMutationLog: true, storageWatchLog: true, wsMessageCatalog: true, snapshots: true, tokenVault: false, storageVault: false, fingerprint: true, misconfig: true, graphqlIntrospection: true, findings: true, pathDiscovery: true, paramDiscovery: true },
         _globalsSnapshot: null,
         _storageType: 'local',
         _networkFilter: 'same-origin',
@@ -5796,7 +6329,11 @@
         _discoveryMode: 'standard',
         _discoveryRunning: null,
         _discoveryLog: [],
+        _discoveryCurrentStep: null,
+        _discoveryHideNotFound: true,
         _discoverySaveNameInput: '',
+        _discoveryParsedCandidates: [],
+        _graphqlMode: 'standard',
 
         _crawlCandidates: [],
         _crawlVisited: [],
@@ -5807,6 +6344,15 @@
         _crawlLog: [],
         _domSnapshotSource: null,
         _scriptsSnapshotSource: null,
+
+        _paramDiscoveryUrl: '',
+        _paramDiscoveryWordlistText: '',
+        _paramDiscoveryDelay: 400,
+        _paramDiscoveryMode: 'standard',
+        _paramDiscoveryRunning: null,
+        _paramDiscoveryLog: [],
+        _paramDiscoveryCurrentStep: null,
+        _paramDiscoveryCandidates: [],
 
         _sectionGroups: [
             {
@@ -5850,6 +6396,7 @@
                 sections: [
                     { value: 'fingerprint', label: 'Tech Fingerprint' },
                     { value: 'misconfig', label: 'Misconfig Audit' },
+                    { value: 'graphql', label: 'GraphQL Introspection' },
                     { value: 'findings', label: 'Findings (consolidated)' }
                 ]
             },
@@ -5857,7 +6404,8 @@
                 id: 'discovery', label: 'Active Discovery',
                 sections: [
                     { value: 'pathdiscovery', label: 'Path/Endpoint Brute-force' },
-                    { value: 'crawler', label: 'Same-Origin Crawler' }
+                    { value: 'crawler', label: 'Same-Origin Crawler' },
+                    { value: 'paramdiscovery', label: 'Hidden Parameter Discovery' }
                 ]
             },
             {
@@ -5932,6 +6480,7 @@
             if (this._section === 'websocket' && this._wsSequenceRunning) { this._wsSequenceRunning.stop(); this._wsSequenceRunning = null; } 
             if (this._section === 'pathdiscovery' && this._discoveryRunning) { this._discoveryRunning.stop(); this._discoveryRunning = null; }
             if (this._section === 'crawler' && this._crawlRunning) { this._crawlRunning.stop(); this._crawlRunning = null; }
+            if (this._section === 'paramdiscovery' && this._paramDiscoveryRunning) { this._paramDiscoveryRunning.stop(); this._paramDiscoveryRunning = null; }
             if (this._section === 'globals' && name !== 'globals') this._highlightGlobalKey = null;
             this._section = name;
             this._activeCategory = this._categoryForSection(name);
@@ -5968,9 +6517,11 @@
             if (this._section === 'console') return this._renderConsole();
             if (this._section === 'fingerprint') return this._renderFingerprint();
             if (this._section === 'misconfig') return this._renderMisconfig();
+            if (this._section === 'graphql') return this._renderGraphQLIntrospection();
             if (this._section === 'findings') return this._renderFindings();
             if (this._section === 'pathdiscovery') return this._renderPathDiscovery();
             if (this._section === 'crawler') return this._renderCrawler();
+            if (this._section === 'paramdiscovery') return this._renderParamDiscovery();
         },
 
         _renderDom() {
@@ -7723,7 +8274,10 @@
             const storageVaultCount = StorageVault.all().length;
             const fingerprintCount = Recon.fingerprint().length;
             const misconfigCount = Recon.misconfigAudit().length;
+            const graphqlIntrospectionCount = Recon.allGraphQLResults().length;
             const findingsCount = Findings.gather().length;
+            const pathDiscoveryCount = (this._discoveryLog || []).length;
+            const paramDiscoveryCount = (this._paramDiscoveryLog || []).length;
 
             const persistedTrafficBytes = ObservedTraffic.persistedTrafficByteSize();
             const persistedTrafficWarning = ObservedTraffic._persistedTrafficWriteFailed
@@ -7768,6 +8322,9 @@
                     <label style="display:flex;align-items:center;gap:6px;font-size:9px;color:${t.statusWarn};padding:0 0 4px 24px;">Off by default - usually just test data, but a saved cookie value can carry session-identifying material.</label>
                     <label style="display:flex;align-items:center;gap:6px;font-size:11px;padding:4px 0;${fingerprintCount ? '' : 'opacity:0.5;'}"><input type="checkbox" id="ttd-pi-export-fingerprint" ${cats.fingerprint ? 'checked' : ''} ${fingerprintCount ? '' : 'disabled'}> Tech fingerprint (${fingerprintCount}) ${this._survivalDot('fresh', t)}</label>
                     <label style="display:flex;align-items:center;gap:6px;font-size:11px;padding:4px 0;${misconfigCount ? '' : 'opacity:0.5;'}"><input type="checkbox" id="ttd-pi-export-misconfig" ${cats.misconfig ? 'checked' : ''} ${misconfigCount ? '' : 'disabled'}> Misconfig audit (${misconfigCount}) ${this._survivalDot('fresh', t)}</label>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:11px;padding:4px 0;${graphqlIntrospectionCount ? '' : 'opacity:0.5;'}"><input type="checkbox" id="ttd-pi-export-graphqlIntrospection" ${cats.graphqlIntrospection ? 'checked' : ''} ${graphqlIntrospectionCount ? '' : 'disabled'}> GraphQL introspection checks (${graphqlIntrospectionCount}) ${this._survivalDot('resets', t)}</label>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:11px;padding:4px 0;${pathDiscoveryCount ? '' : 'opacity:0.5;'}"><input type="checkbox" id="ttd-pi-export-pathDiscovery" ${cats.pathDiscovery ? 'checked' : ''} ${pathDiscoveryCount ? '' : 'disabled'}> Active Discovery: Path/Endpoint Brute-force results, last run (${pathDiscoveryCount}) ${this._survivalDot('resets', t)}</label>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:11px;padding:4px 0;${paramDiscoveryCount ? '' : 'opacity:0.5;'}"><input type="checkbox" id="ttd-pi-export-paramDiscovery" ${cats.paramDiscovery ? 'checked' : ''} ${paramDiscoveryCount ? '' : 'disabled'}> Active Discovery: Hidden Parameter Discovery results, last run (${paramDiscoveryCount}) ${this._survivalDot('resets', t)}</label>
                     <label style="display:flex;align-items:center;gap:6px;font-size:11px;padding:4px 0;${findingsCount ? '' : 'opacity:0.5;'}"><input type="checkbox" id="ttd-pi-export-findings" ${cats.findings ? 'checked' : ''} ${findingsCount ? '' : 'disabled'}> Findings, consolidated (${findingsCount}) ${this._survivalDot('fresh', t)}</label>
                 </div>
                 <div style="display:flex;gap:6px;margin-bottom:6px;">
@@ -7784,7 +8341,7 @@
                 <button id="ttd-pi-export-csv-file" style="${Helpers._secondaryBtnStyle(t)}width:100%;">Download CSV</button>
             `;
 
-            ['traffic', 'catalog', 'persistedTraffic', 'recorder', 'element', 'pageTiming', 'websocket', 'wsMessageCatalog', 'traceHistory', 'replay', 'replayHistory', 'sandboxRun', 'sandboxHistory', 'domSnapshot', 'eventDebugLog', 'domMutationLog', 'storageWatchLog', 'snapshots', 'tokenVault', 'storageVault', 'fingerprint', 'misconfig', 'findings'].forEach((key) => {
+            ['traffic', 'catalog', 'persistedTraffic', 'recorder', 'element', 'pageTiming', 'websocket', 'wsMessageCatalog', 'traceHistory', 'replay', 'replayHistory', 'sandboxRun', 'sandboxHistory', 'domSnapshot', 'eventDebugLog', 'domMutationLog', 'storageWatchLog', 'snapshots', 'tokenVault', 'storageVault', 'fingerprint', 'misconfig', 'graphqlIntrospection', 'findings', 'pathDiscovery', 'paramDiscovery'].forEach((key) => {
                 const cb = document.getElementById(`ttd-pi-export-${key}`);
                 if (cb) cb.onchange = (e) => { this._exportCategories[key] = e.target.checked; };
             });
@@ -10145,7 +10702,7 @@
             const hits = Recon.fingerprint();
 
             area.innerHTML = `
-                <div style="font-size:10px;color:${t.cardDesc};margin-bottom:8px;">Passive signature match against the page's own DOM, globals, meta tags, and response headers already seen in traffic history. Nothing is fetched for this - re-run after the page changes or more traffic is captured. Tap a finding to jump to where it was found.</div>
+                <div style="font-size:10px;color:${t.cardDesc};margin-bottom:8px;">Passive signature match against the page's own DOM, globals, meta tags, response headers already seen in traffic history, and this page's headers if checked via Misconfig Audit's "Check this page's headers". Nothing is fetched for this directly - re-run after the page changes, more traffic is captured, or headers are checked. Tap a finding to jump to where it was found.</div>
                 <div style="display:flex;gap:6px;margin-bottom:8px;">
                     <button id="ttd-pi-fp-rescan" style="${Helpers._secondaryBtnStyle(t)}white-space:nowrap;">Re-scan</button>
                     <button id="ttd-pi-fp-copy" style="${Helpers._secondaryBtnStyle(t)}white-space:nowrap;">Copy all</button>
@@ -10160,13 +10717,17 @@
             } else {
                 hits.forEach((h) => {
                     const row = document.createElement('div');
-                    row.style.cssText = `padding:6px 8px;font-size:11px;border-bottom:1px solid ${t.rowBorder};word-break:break-word;cursor:pointer;`;
+                    row.style.cssText = `padding:6px 8px;font-size:11px;border-bottom:1px solid ${t.rowBorder};word-break:break-word;cursor:pointer;${h.cves && h.cves.length ? `background:${t.statusBad}1a;` : ''}`;
                     const confColor = h.confidence === 'high' ? t.statusOk : (h.confidence === 'medium' ? t.statusWarn : t.statusNeutral);
+                    const versionBadge = h.version ? `<span style="color:${t.statusOk};font-weight:700;"> v${Helpers._escape(h.version)}</span>` : '';
+                    const versionNote = h.version ? ` | version via ${Helpers._escape(h.versionSource)}` : '';
+                    const cveLines = (h.cves && h.cves.length) ? h.cves.map((c) => `\u26A0\uFE0F ${Helpers._escape(h.name)} ${Helpers._escape(h.version)} - below patched version for ${c.cves.map(Helpers._escape).join('/')} (disclosed ${Helpers._escape(c.disclosed)}): ${Helpers._escape(c.note)}`).join('<br>') : '';
                     row.innerHTML = `
-                        <span style="font-weight:700;">${Helpers._escape(h.name)}</span>
+                        <span style="font-weight:700;">${Helpers._escape(h.name)}</span>${versionBadge}
                         <span style="color:${t.cardDesc};"> - ${Helpers._escape(h.category)}</span>
                         <span style="float:right;color:${confColor};font-weight:700;text-transform:uppercase;font-size:10px;">${h.confidence}</span>
-                        <br><span style="font-size:10px;color:${t.cardDesc};">${h.evidence.map(Helpers._escape).join('; ') || 'pattern match'} <span style="color:${t.statusOk};">- tap to view</span></span>
+                        <br><span style="font-size:10px;color:${t.cardDesc};">${h.evidence.map(Helpers._escape).join('; ') || 'pattern match'}${versionNote} <span style="color:${t.statusOk};">- tap to view</span></span>
+                        ${cveLines ? `<br><span style="font-size:10px;color:${t.statusBad};font-weight:700;">${cveLines}</span>` : ''}
                     `;
                     row.onclick = () => this._navigateToLocate(h.locate);
                     listEl.appendChild(row);
@@ -10196,7 +10757,7 @@
             const findings = Recon.misconfigAudit();
 
             area.innerHTML = `
-                <div style="font-size:10px;color:${t.cardDesc};margin-bottom:8px;">Passive checks against response headers already in traffic history, cookies visible to document.cookie, and error bodies already captured. "Check this page's headers" is the one opt-in request this panel can make - a single same-origin GET to read this document's own headers (fetch/XHR hooks can't see the original navigation response). Tap a finding to jump to where it was found.</div>
+                <div style="font-size:10px;color:${t.cardDesc};margin-bottom:8px;">Passive checks against response headers already in traffic history, cookies visible to document.cookie, error bodies already captured, and CORS header pairings (Access-Control-Allow-Origin / -Credentials) on already-observed cross-origin traffic. "Check this page's headers" is the one opt-in request this panel can make - a single same-origin GET to read this document's own headers (fetch/XHR hooks can't see the original navigation response). Tap a finding to jump to where it was found.</div>
                 <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;">
                     <button id="ttd-pi-mc-fetchheaders" style="${Helpers._secondaryBtnStyle(t)}white-space:nowrap;" ${Recon._pageHeadersFetching ? 'disabled' : ''}>${Recon._pageHeadersFetching ? 'Checking...' : "Check this page's headers"}</button>
                     <button id="ttd-pi-mc-rescan" style="${Helpers._secondaryBtnStyle(t)}white-space:nowrap;">Re-scan</button>
@@ -10252,16 +10813,83 @@
             };
         },
 
+        _renderGraphQLIntrospection() {
+            const t = Theme.palette;
+            const area = document.getElementById('ttd-pi-content');
+            const endpoints = Recon.cataloggedGraphQLEndpoints();
+
+            area.innerHTML = `
+                <div style="font-size:10px;color:${t.statusWarn};margin-bottom:8px;">Sends one benign GraphQL introspection query (asks only for the schema's root query type name, nothing else) as a real POST request when you tap "Check introspection". Nothing here runs automatically - each check is opt-in per endpoint.</div>
+                <div style="font-size:10px;color:${t.cardDesc};margin-bottom:2px;">Send mode</div>
+                <div style="display:flex;gap:6px;margin-bottom:8px;">
+                    <button id="ttd-gql-mode-standard" style="${Helpers._pillStyle(t, this._graphqlMode !== 'privileged')}flex:1;">Standard (fetch)</button>
+                    <button id="ttd-gql-mode-privileged" style="${Helpers._pillStyle(t, this._graphqlMode === 'privileged')}flex:1;" ${RequestReplay.privilegedAvailable() ? '' : 'disabled'}>Privileged (GM)</button>
+                </div>
+                <div id="ttd-gql-list"></div>
+            `;
+
+            document.getElementById('ttd-gql-mode-standard').onclick = () => { this._graphqlMode = 'standard'; this._renderGraphQLIntrospection(); };
+            const privBtn = document.getElementById('ttd-gql-mode-privileged');
+            if (privBtn && !privBtn.disabled) privBtn.onclick = () => { this._graphqlMode = 'privileged'; this._renderGraphQLIntrospection(); };
+
+            this._renderGraphQLList(endpoints);
+        },
+
+        _renderGraphQLList(endpoints) {
+            const t = Theme.palette;
+            const listEl = document.getElementById('ttd-gql-list');
+            if (!listEl) return;
+            if (!endpoints.length) {
+                listEl.innerHTML = `<div style="font-size:11px;color:${t.cardDesc};">No /graphql-shaped endpoints cataloged yet - browse the site, or run Active Discovery with /graphql in the wordlist (it's in the default list), then come back here.</div>`;
+                return;
+            }
+            listEl.innerHTML = '';
+            endpoints.forEach((c) => {
+                const url = c.exampleUrl;
+                const result = Recon.getGraphQLResult(url);
+                const row = document.createElement('div');
+                row.style.cssText = `padding:6px 8px;border:1px solid ${t.rowBorder};border-radius:6px;margin-bottom:6px;font-size:11px;word-break:break-all;`;
+
+                let resultHtml = '';
+                if (result) {
+                    if (!result.ok) {
+                        resultHtml = `<div style="margin-top:4px;font-size:10px;color:${t.statusBad};">Check failed: ${Helpers._escape(result.error || 'unknown error')}</div>`;
+                    } else if (result.enabled === true) {
+                        resultHtml = `<div style="margin-top:4px;font-size:10px;color:${t.statusBad};font-weight:700;">INTROSPECTION ENABLED - queryType: "${Helpers._escape(result.queryTypeName)}" (status ${result.status})</div>`;
+                    } else if (result.enabled === false) {
+                        resultHtml = `<div style="margin-top:4px;font-size:10px;color:${t.statusOk};">Introspection appears disabled/blocked (status ${result.status}${result.errorsPresent ? ', errors returned' : ''})</div>`;
+                    } else {
+                        resultHtml = `<div style="margin-top:4px;font-size:10px;color:${t.statusNeutral};">Inconclusive - got a status ${result.status} response that wasn't valid JSON, so this may not be a real GraphQL endpoint (or needs different headers/auth).</div>`;
+                    }
+                }
+
+                row.innerHTML = `
+                    <b>${Helpers._escape(c.method)} ${Helpers._escape(c.host)}${Helpers._escape(c.pathPattern)}</b>
+                    <div style="font-size:9px;color:${t.cardDesc};margin-top:2px;">${Helpers._escape(Helpers._shortenUrl(url))}</div>
+                    ${resultHtml}
+                    <button data-check style="${Helpers._secondaryBtnStyle(t)}margin-top:6px;">${result ? 'Re-check' : 'Check introspection'}</button>
+                `;
+                row.querySelector('[data-check]').onclick = async (e) => {
+                    if (!confirm(`Send a benign GraphQL introspection query to ${url}? This is one real POST request asking only for the schema's root type name - not a full schema dump.`)) return;
+                    e.target.disabled = true;
+                    e.target.textContent = 'Checking...';
+                    await Recon.checkGraphQLIntrospection(url, this._graphqlMode);
+                    this._renderGraphQLList(endpoints);
+                };
+                listEl.appendChild(row);
+            });
+        },
+
         _renderFindings() {
             const t = Theme.palette;
             const area = document.getElementById('ttd-pi-content');
             const findings = Findings.gather();
             const counts = { high: 0, medium: 0, low: 0 };
             findings.forEach((f) => { counts[f.confidence] = (counts[f.confidence] || 0) + 1; });
-            const sourceLabel = { misconfig: 'Misconfig', fingerprint: 'Fingerprint', sweep: 'Sweep anomaly' };
+            const sourceLabel = { misconfig: 'Misconfig', fingerprint: 'Fingerprint', sweep: 'Sweep anomaly', graphql: 'GraphQL introspection', cve: 'Outdated library CVE' };
 
             area.innerHTML = `
-                <div style="font-size:10px;color:${t.cardDesc};margin-bottom:8px;">Rolls up Tech Fingerprint, Misconfig Audit, and flagged Parameter Sweep results into one list, scored 0-100. Score blends source severity/confidence with, for sweep results, how many independent signal types (status/length/timing/error-signature) corroborated each other - multiple weaker signals lining up score higher than any single one alone. This is a prioritization aid, not confirmation of a real vulnerability. Tap a finding to jump to where it was found.</div>
+                <div style="font-size:10px;color:${t.cardDesc};margin-bottom:8px;">Rolls up Tech Fingerprint (including outdated-library CVE matches), Misconfig Audit (including CORS), GraphQL introspection checks, and flagged Parameter Sweep results into one list, scored 0-100. Score blends source severity/confidence with, for sweep results, how many independent signal types (status/length/timing/error-signature) corroborated each other - multiple weaker signals lining up score higher than any single one alone. This is a prioritization aid, not confirmation of a real vulnerability. Tap a finding to jump to where it was found.</div>
                 <div style="font-size:11px;margin-bottom:8px;">
                     <span style="color:${t.statusBad};font-weight:700;">${counts.high || 0} high</span> ·
                     <span style="color:${t.statusWarn};font-weight:700;"> ${counts.medium || 0} medium</span> ·
@@ -10345,6 +10973,12 @@
                 <input id="ttd-disc-import-input" type="file" accept=".csv,.txt,text/csv,text/plain" style="display:none;">
                 <div id="ttd-disc-import-status" style="font-size:10px;margin-bottom:8px;"></div>
 
+                <select id="ttd-disc-cms-preset" style="width:100%;box-sizing:border-box;padding:6px;margin-bottom:4px;background:${t.selectBg};color:${t.selectText};border:1px solid ${t.selectBorder};border-radius:6px;font-size:11px;">
+                    <option value="">Add CMS plugin/theme wordlist preset...</option>
+                    ${Object.entries(ActiveDiscovery.CMS_PRESET_META).map(([key, m]) => `<option value="${key}">${Helpers._escape(m.label)} (${ActiveDiscovery.buildCmsWordlist(key).length})</option>`).join('')}
+                </select>
+                <div style="font-size:9px;color:${t.cardDesc};margin-bottom:8px;">Common plugin/theme/module slugs combined with known install-path patterns (e.g. /wp-content/plugins/&lt;slug&gt;/). Appends to the list above rather than replacing it - only against origins you're authorized to test.</div>
+
                 <div style="font-size:10px;color:${t.cardDesc};margin-bottom:2px;">Saved lists (persist across reloads - one per partner/dev, tap to load)</div>
                 <div id="ttd-disc-saved-lists" style="margin-bottom:6px;"></div>
                 <div style="display:flex;gap:6px;margin-bottom:8px;">
@@ -10361,10 +10995,17 @@
                     <button id="ttd-disc-run" style="${Helpers._primaryBtnStyle()}flex:1;" ${this._discoveryRunning ? 'disabled' : ''}>${this._discoveryRunning ? 'Running...' : 'Run'}</button>
                     ${this._discoveryRunning ? `<button id="ttd-disc-stop" style="${Helpers._secondaryBtnStyle(t)}color:${t.statusBad};">Stop</button>` : ''}
                 </div>
-                <div style="font-size:10px;color:${t.cardDesc};margin-bottom:8px;">Non-404 responses are written into Traffic history and Observed Endpoints; every attempt (including 404s) shows in the log below either way.</div>
+                <div id="ttd-disc-status" style="font-size:10px;color:${t.cardDesc};margin-bottom:6px;min-height:14px;"></div>
+                <label style="display:flex;align-items:center;gap:6px;font-size:10px;color:${t.cardDesc};margin-bottom:8px;cursor:pointer;">
+                    <input id="ttd-disc-hide-404" type="checkbox" ${this._discoveryHideNotFound ? 'checked' : ''}> Hide 404s in results below (still counted, still checked against Traffic history)
+                </label>
+                <div style="font-size:9px;color:${t.cardDesc};margin-bottom:8px;">Hits shaped like a directory (path ends in / with a 200 or 403) get a "Brute-force under this path" button - queues a follow-on run of the current wordlist scoped to that path, same confirm as Run above.</div>
 
                 <div id="ttd-disc-log"></div>
+                <div id="ttd-disc-parsed"></div>
             `;
+
+            document.getElementById('ttd-disc-hide-404').onchange = (e) => { this._discoveryHideNotFound = e.target.checked; this._renderDiscoveryLog(); };
 
             document.getElementById('ttd-disc-mode-standard').onclick = () => { this._discoveryMode = 'standard'; this._renderPathDiscovery(); };
             const privBtn = document.getElementById('ttd-disc-mode-privileged');
@@ -10377,6 +11018,7 @@
             };
             document.getElementById('ttd-disc-delay').oninput = (e) => { this._discoveryDelay = e.target.value; };
             document.getElementById('ttd-disc-reset-wordlist').onclick = () => { this._discoveryWordlistText = ActiveDiscovery.DEFAULT_WORDLIST.join('\n'); document.getElementById('ttd-disc-import-status').textContent = ''; this._renderPathDiscovery(); };
+            document.getElementById('ttd-disc-cms-preset').onchange = (e) => { this._loadCmsWordlistPreset(e.target.value); };
             document.getElementById('ttd-disc-run').onclick = () => this._runPathDiscovery();
             const stopBtn = document.getElementById('ttd-disc-stop');
             if (stopBtn) stopBtn.onclick = () => {
@@ -10418,6 +11060,7 @@
 
             this._renderDiscoverySavedLists();
             this._renderDiscoveryLog();
+            this._renderDiscoveryParsedCandidates();
         },
 
         _renderDiscoverySavedLists() {
@@ -10452,6 +11095,55 @@
             });
         },
 
+        _resolveCandidateToPath(value, baseUrl) {
+            try {
+                const u = new URL(value, baseUrl);
+                const b = new URL(baseUrl);
+                if (u.host !== b.host) return null;
+                return u.pathname + u.search;
+            } catch { return null; }
+        },
+
+        _addParsedCandidates(source, items) {
+            const known = new Set(this._discoveryParsedCandidates.map((c) => `${c.source}\u0000${c.rawValue}`));
+            items.forEach((item) => {
+                const key = `${source}\u0000${item.rawValue}`;
+                if (known.has(key)) return;
+                known.add(key);
+                this._discoveryParsedCandidates.push({ source, ...item, selected: false });
+            });
+        },
+
+        _loadCmsWordlistPreset(key) {
+            if (!key) return;
+            const preset = ActiveDiscovery.getCmsWordlistPreset(key);
+            if (!preset) return;
+            const existing = new Set(ActiveDiscovery.parseWordlist(this._discoveryWordlistText));
+            const toAdd = preset.values.filter((p) => !existing.has(p));
+            if (!toAdd.length) {
+                alert(`All ${preset.values.length} ${preset.label} paths are already in the wordlist.`);
+                this._renderPathDiscovery();
+                return;
+            }
+            const skipped = preset.values.length - toAdd.length;
+            if (!confirm(`Add ${toAdd.length} ${preset.label} paths to the wordlist?${skipped ? ` (${skipped} already present, skipped)` : ''}`)) {
+                this._renderPathDiscovery();
+                return;
+            }
+            const sep = this._discoveryWordlistText && !this._discoveryWordlistText.endsWith('\n') ? '\n' : '';
+            this._discoveryWordlistText = this._discoveryWordlistText + sep + toAdd.join('\n');
+            this._renderPathDiscovery();
+        },
+
+        _recurseDiscoveryInto(url) {
+            if (!url) return;
+            if (this._discoveryRunning) { alert('A discovery run is already in progress - stop it first before starting a recursive run.'); return; }
+            this._discoveryBaseUrl = url;
+            this._renderPathDiscovery();
+            document.getElementById('ttd-pi-content').scrollIntoView({ block: 'start' });
+            this._runPathDiscovery();
+        },
+
         _runPathDiscovery() {
             const paths = ActiveDiscovery.parseWordlist(this._discoveryWordlistText);
             if (!paths.length) return;
@@ -10459,20 +11151,53 @@
             if (!baseUrl) return;
             const delay = Math.max(ActiveDiscovery.MIN_DELAY_MS, Number(this._discoveryDelay) || 0);
             const modeLabel = this._discoveryMode === 'privileged' ? 'Privileged (GM_xmlhttpRequest)' : 'Standard (fetch)';
-            if (!confirm(`Run path discovery against ${baseUrl}? This sends ${paths.length} real GET request${paths.length === 1 ? '' : 's'} using ${modeLabel} send, ${delay}ms apart. This target may treat some GET requests as real actions - review the path list before proceeding if you're unsure.`)) return;
+            if (!confirm(`Run path discovery against ${baseUrl}? This sends ${paths.length} real GET request${paths.length === 1 ? '' : 's'} (current wordlist) using ${modeLabel} send, ${delay}ms apart. This target may treat some GET requests as real actions - review the path list before proceeding if you're unsure.`)) return;
 
             this._discoveryLog = [];
+            this._discoveryParsedCandidates = [];
+            this._discoveryCurrentStep = null;
             this._discoveryRunning = ActiveDiscovery.runPathDiscovery(baseUrl, paths, delay, this._discoveryMode, {
+                onStart: (stepIndex, path, url, total) => {
+                    this._discoveryCurrentStep = { index: stepIndex, total, path };
+                    this._renderDiscoveryStatus();
+                },
                 onStep: (stepIndex, path, url, result, isHit) => {
-                    this._discoveryLog.push({ path, url, ok: result.ok, status: result.ok ? result.status : null, durationMs: result.durationMs, error: result.ok ? null : result.error, isHit, timestamp: Date.now() });
+                    const bodyTextForDirCheck = isHit && result.ok ? (result.rawText || '') : '';
+                    const looksLikeDir = isHit && result.ok && path.endsWith('/') && [200, 403].includes(result.status);
+                    const looksLikeListing = looksLikeDir && /<title>\s*index of|index of \//i.test(bodyTextForDirCheck);
+                    this._discoveryLog.push({ path, url, ok: result.ok, status: result.ok ? result.status : null, durationMs: result.durationMs, error: result.ok ? null : result.error, isHit, looksLikeDir, looksLikeListing, timestamp: Date.now() });
+                    if (isHit && result.ok) {
+                        const bodyText = result.rawText || (result.json ? (() => { try { return JSON.stringify(result.json); } catch { return ''; } })() : '') || '';
+                        if (bodyText && /\/robots\.txt(\?|$)/i.test(url)) {
+                            const parsed = ActiveDiscovery.parseRobotsTxt(bodyText);
+                            this._addParsedCandidates('robots.txt', parsed.paths.map((p) => ({ rawValue: p.value, kind: p.kind, resolvedPath: this._resolveCandidateToPath(p.value, url) })));
+                            this._addParsedCandidates('robots.txt', parsed.sitemaps.map((s) => ({ rawValue: s, kind: 'sitemap-directive', resolvedPath: this._resolveCandidateToPath(s, url) })));
+                        } else if (bodyText && /\/sitemap\.xml(\?|$)/i.test(url)) {
+                            const locs = ActiveDiscovery.parseSitemapXml(bodyText);
+                            this._addParsedCandidates('sitemap.xml', locs.map((l) => ({ rawValue: l, kind: 'loc', resolvedPath: this._resolveCandidateToPath(l, url) })));
+                        }
+                    }
                     this._renderDiscoveryLog();
+                    this._renderDiscoveryParsedCandidates();
                 },
                 onDone: () => {
                     this._discoveryRunning = null;
+                    this._discoveryCurrentStep = null;
                     this._renderPathDiscovery();
                 }
             });
             this._renderPathDiscovery();
+        },
+
+        _renderDiscoveryStatus() {
+            const t = Theme.palette;
+            const el = document.getElementById('ttd-disc-status');
+            if (!el) return;
+            const cur = this._discoveryCurrentStep;
+            if (!cur) { el.innerHTML = ''; return; }
+            const n = cur.index + 1;
+            el.innerHTML = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${t.statusWarn};margin-right:6px;animation:ttd-disc-pulse 1s ease-in-out infinite;"></span>Checking ${n}/${cur.total}: <span style="font-family:monospace;">${Helpers._escape(cur.path)}</span>
+                <style>@keyframes ttd-disc-pulse { 0%,100% { opacity:1; } 50% { opacity:.25; } }</style>`;
         },
 
         _renderDiscoveryLog() {
@@ -10482,21 +11207,236 @@
             if (!this._discoveryLog.length) { el.innerHTML = ''; return; }
             const hitEntries = this._discoveryLog.filter((l) => l.isHit);
             const hits = hitEntries.length;
+            const notFoundCount = this._discoveryLog.filter((l) => l.ok && l.status === 404).length;
+            const visibleEntries = this._discoveryHideNotFound
+                ? this._discoveryLog.filter((l) => !(l.ok && l.status === 404))
+                : this._discoveryLog;
             el.innerHTML = `
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;gap:6px;">
-                    <span style="font-size:11px;font-weight:700;">Results (${this._discoveryLog.length} tried, ${hits} hit${hits === 1 ? '' : 's'})</span>
-                    <button id="ttd-disc-send-crawler" style="${Helpers._secondaryBtnStyle(t)}white-space:nowrap;" ${hits ? '' : 'disabled'}>Send ${hits} hit${hits === 1 ? '' : 's'} to Crawler</button>
+                    <span style="font-size:11px;font-weight:700;">Results (${this._discoveryLog.length} tried, ${hits} hit${hits === 1 ? '' : 's'}${this._discoveryHideNotFound && notFoundCount ? `, ${notFoundCount} 404${notFoundCount === 1 ? '' : 's'} hidden` : ''})</span>
+                    <div style="display:flex;gap:6px;">
+                        <button id="ttd-disc-send-crawler" style="${Helpers._secondaryBtnStyle(t)}white-space:nowrap;" ${hits ? '' : 'disabled'}>Send ${hits} to Crawler</button>
+                        <button id="ttd-disc-send-paramdisc" style="${Helpers._secondaryBtnStyle(t)}white-space:nowrap;" ${hits ? '' : 'disabled'}>Send ${hits} to Hidden Params</button>
+                    </div>
                 </div>
                 <div style="max-height:220px;overflow-y:auto;border:1px solid ${t.rowBorder};border-radius:6px;">
-                    ${this._discoveryLog.slice().reverse().map((l) => `
+                    ${visibleEntries.length ? visibleEntries.slice().reverse().map((l) => `
                         <div style="padding:5px 8px;border-bottom:1px solid ${t.rowBorder};font-size:10px;word-break:break-all;${l.isHit ? `background:${t.secondaryBtnBg};` : ''}">
                             <b>${Helpers._escape(l.path)}</b> - ${l.ok ? `<span style="color:${l.isHit ? t.statusOk : t.statusNeutral};font-weight:${l.isHit ? '700' : '400'};">${l.status}</span> - ${l.durationMs}ms` : `<span style="color:${t.statusBad};">${Helpers._escape(l.error)}</span>`}
+                            ${l.looksLikeDir ? `<div style="margin-top:4px;"><button class="ttd-disc-recurse-btn" data-url="${Helpers._escape(l.url)}" style="${Helpers._secondaryBtnStyle(t)}font-size:9px;padding:3px 8px;">${l.looksLikeListing ? '\u{1F4C2} Open listing - ' : ''}Brute-force under this path</button></div>` : ''}
                         </div>
-                    `).join('')}
+                    `).join('') : `<div style="padding:8px;font-size:10px;color:${t.cardDesc};">All results so far are 404s - hidden. Uncheck "Hide 404s" above to see them.</div>`}
                 </div>
             `;
             const sendBtn = document.getElementById('ttd-disc-send-crawler');
             if (sendBtn && hits) sendBtn.onclick = () => this._sendUrlsToCrawler(hitEntries.map((l) => l.url));
+            const sendParamBtn = document.getElementById('ttd-disc-send-paramdisc');
+            if (sendParamBtn && hits) sendParamBtn.onclick = () => this._sendUrlsToParamDiscovery(hitEntries.map((l) => l.url));
+            el.querySelectorAll('.ttd-disc-recurse-btn').forEach((btn) => {
+                btn.onclick = () => this._recurseDiscoveryInto(btn.getAttribute('data-url'));
+            });
+        },
+
+        _renderDiscoveryParsedCandidates() {
+            const t = Theme.palette;
+            const el = document.getElementById('ttd-disc-parsed');
+            if (!el) return;
+            const items = this._discoveryParsedCandidates;
+            if (!items.length) { el.innerHTML = ''; return; }
+            const selectedCount = items.filter((c) => c.selected).length;
+            const kindLabel = { disallow: 'Disallow', allow: 'Allow', 'sitemap-directive': 'Sitemap:', loc: '<loc>' };
+            el.innerHTML = `
+                <div style="display:flex;justify-content:space-between;align-items:center;margin:8px 0 4px;gap:6px;">
+                    <span style="font-size:11px;font-weight:700;">Parsed from robots.txt / sitemap.xml (${items.length})</span>
+                    <div style="display:flex;gap:6px;">
+                        <button id="ttd-disc-parsed-selectall" style="${Helpers._secondaryBtnStyle(t)}white-space:nowrap;">Select all</button>
+                        <button id="ttd-disc-parsed-clear" style="${Helpers._secondaryBtnStyle(t)}white-space:nowrap;">Clear sel.</button>
+                    </div>
+                </div>
+                <div style="font-size:9px;color:${t.cardDesc};margin-bottom:6px;">Same-origin entries resolve to a path you can add to the wordlist above; off-origin or unresolvable entries (external sitemaps, wildcard robots.txt rules) are listed for review only.</div>
+                <div style="max-height:220px;overflow-y:auto;border:1px solid ${t.rowBorder};border-radius:6px;margin-bottom:6px;">
+                    ${items.map((c, i) => `
+                        <label style="display:flex;align-items:flex-start;gap:6px;padding:5px 8px;border-bottom:1px solid ${t.rowBorder};font-size:10px;word-break:break-all;cursor:${c.resolvedPath ? 'pointer' : 'default'};${c.resolvedPath ? '' : 'opacity:0.55;'}">
+                            <input type="checkbox" data-idx="${i}" ${c.selected ? 'checked' : ''} ${c.resolvedPath ? '' : 'disabled'} style="margin-top:2px;">
+                            <span><span style="color:${t.cardDesc};">[${Helpers._escape(c.source)} - ${kindLabel[c.kind] || c.kind}]</span> ${Helpers._escape(c.rawValue)}${c.resolvedPath ? '' : ` <span style="color:${t.statusNeutral};">- off-origin/unresolvable</span>`}</span>
+                        </label>
+                    `).join('')}
+                </div>
+                <button id="ttd-disc-parsed-add" style="${Helpers._secondaryBtnStyle(t)}width:100%;" ${selectedCount ? '' : 'disabled'}>Add ${selectedCount || ''} selected to wordlist</button>
+            `;
+            el.querySelectorAll('input[type="checkbox"][data-idx]').forEach((cb) => {
+                cb.onchange = (e) => {
+                    const idx = Number(e.target.getAttribute('data-idx'));
+                    if (items[idx]) items[idx].selected = e.target.checked;
+                    this._renderDiscoveryParsedCandidates();
+                };
+            });
+            const selectAllBtn = document.getElementById('ttd-disc-parsed-selectall');
+            if (selectAllBtn) selectAllBtn.onclick = () => { items.forEach((c) => { if (c.resolvedPath) c.selected = true; }); this._renderDiscoveryParsedCandidates(); };
+            const clearBtn = document.getElementById('ttd-disc-parsed-clear');
+            if (clearBtn) clearBtn.onclick = () => { items.forEach((c) => { c.selected = false; }); this._renderDiscoveryParsedCandidates(); };
+            const addBtn = document.getElementById('ttd-disc-parsed-add');
+            if (addBtn) addBtn.onclick = () => {
+                const existing = new Set(ActiveDiscovery.parseWordlist(this._discoveryWordlistText));
+                const toAdd = items.filter((c) => c.selected && c.resolvedPath && !existing.has(c.resolvedPath)).map((c) => c.resolvedPath);
+                if (!toAdd.length) return;
+                const sep = this._discoveryWordlistText && !this._discoveryWordlistText.endsWith('\n') ? '\n' : '';
+                this._discoveryWordlistText = this._discoveryWordlistText + sep + toAdd.join('\n');
+                items.forEach((c) => { if (c.selected && c.resolvedPath) c.selected = false; });
+                this._renderPathDiscovery();
+            };
+        },
+
+        _renderParamDiscovery() {
+            const t = Theme.palette;
+            const area = document.getElementById('ttd-pi-content');
+            if (!this._paramDiscoveryUrl) this._paramDiscoveryUrl = location.href;
+            if (!this._paramDiscoveryWordlistText) this._paramDiscoveryWordlistText = ActiveDiscovery.DEFAULT_PARAM_WORDLIST.join('\n');
+            const parsedCount = ActiveDiscovery.parseWordlist(this._paramDiscoveryWordlistText).length;
+
+            area.innerHTML = `
+                <div style="font-size:10px;color:${t.statusWarn};margin-bottom:8px;">Sends one real GET request per parameter name below, each appended to the URL with a probe value (e.g. ?debug=1), against the live server. Reuses the same status/length/timing/error-signature anomaly diff as Parameter Sweep to flag names that shift the response - deltas worth a look, not confirmed findings.</div>
+
+                <div style="font-size:10px;color:${t.cardDesc};margin-bottom:2px;">Send mode</div>
+                <div style="display:flex;gap:6px;margin-bottom:8px;">
+                    <button id="ttd-pd-mode-standard" style="${Helpers._pillStyle(t, this._paramDiscoveryMode !== 'privileged')}flex:1;">Standard (fetch)</button>
+                    <button id="ttd-pd-mode-privileged" style="${Helpers._pillStyle(t, this._paramDiscoveryMode === 'privileged')}flex:1;" ${RequestReplay.privilegedAvailable() ? '' : 'disabled'}>Privileged (GM)</button>
+                </div>
+
+                <div style="font-size:10px;color:${t.cardDesc};margin-bottom:2px;">Target URL (params are appended to this, one at a time)</div>
+                <input id="ttd-pd-url" type="text" value="${Helpers._escape(this._paramDiscoveryUrl)}" style="width:100%;box-sizing:border-box;padding:6px;margin-bottom:8px;background:${t.selectBg};color:${t.selectText};border:1px solid ${t.selectBorder};border-radius:6px;font-size:11px;word-break:break-all;">
+
+                <div id="ttd-pd-candidates"></div>
+
+                <div style="font-size:10px;color:${t.cardDesc};margin-bottom:2px;">Parameter names (<span id="ttd-pd-parsed-count">${parsedCount}</span> parsed) - one per line, or CSV (first column used)</div>
+                <textarea id="ttd-pd-wordlist" rows="6" style="width:100%;box-sizing:border-box;padding:6px;margin-bottom:6px;background:${t.selectBg};color:${t.selectText};border:1px solid ${t.selectBorder};border-radius:6px;font-size:10px;font-family:monospace;">${Helpers._escape(this._paramDiscoveryWordlistText)}</textarea>
+                <button id="ttd-pd-reset-wordlist" style="${Helpers._secondaryBtnStyle(t)}width:100%;margin-bottom:8px;">Reset to default (${ActiveDiscovery.DEFAULT_PARAM_WORDLIST.length})</button>
+
+                <div style="display:flex;gap:6px;margin-bottom:8px;align-items:center;">
+                    <span style="font-size:10px;color:${t.cardDesc};">delay (ms)</span>
+                    <input id="ttd-pd-delay" type="number" min="${ActiveDiscovery.MIN_DELAY_MS}" step="50" value="${this._paramDiscoveryDelay}" style="width:80px;box-sizing:border-box;padding:6px;background:${t.selectBg};color:${t.selectText};border:1px solid ${t.selectBorder};border-radius:6px;font-size:11px;">
+                </div>
+
+                <div style="display:flex;gap:6px;margin-bottom:6px;">
+                    <button id="ttd-pd-run" style="${Helpers._primaryBtnStyle()}flex:1;" ${this._paramDiscoveryRunning ? 'disabled' : ''}>${this._paramDiscoveryRunning ? 'Running...' : 'Run'}</button>
+                    ${this._paramDiscoveryRunning ? `<button id="ttd-pd-stop" style="${Helpers._secondaryBtnStyle(t)}color:${t.statusBad};">Stop</button>` : ''}
+                </div>
+                <div id="ttd-pd-status" style="font-size:10px;color:${t.cardDesc};margin-bottom:8px;min-height:14px;"></div>
+
+                <div id="ttd-pd-log"></div>
+            `;
+
+            document.getElementById('ttd-pd-mode-standard').onclick = () => { this._paramDiscoveryMode = 'standard'; this._renderParamDiscovery(); };
+            const privBtn = document.getElementById('ttd-pd-mode-privileged');
+            if (privBtn && !privBtn.disabled) privBtn.onclick = () => { this._paramDiscoveryMode = 'privileged'; this._renderParamDiscovery(); };
+            document.getElementById('ttd-pd-url').oninput = (e) => { this._paramDiscoveryUrl = e.target.value; };
+            document.getElementById('ttd-pd-wordlist').oninput = (e) => {
+                this._paramDiscoveryWordlistText = e.target.value;
+                const countEl = document.getElementById('ttd-pd-parsed-count');
+                if (countEl) countEl.textContent = ActiveDiscovery.parseWordlist(this._paramDiscoveryWordlistText).length;
+            };
+            document.getElementById('ttd-pd-reset-wordlist').onclick = () => { this._paramDiscoveryWordlistText = ActiveDiscovery.DEFAULT_PARAM_WORDLIST.join('\n'); this._renderParamDiscovery(); };
+            document.getElementById('ttd-pd-delay').oninput = (e) => { this._paramDiscoveryDelay = e.target.value; };
+            document.getElementById('ttd-pd-run').onclick = () => this._runParamDiscovery();
+            const stopBtn = document.getElementById('ttd-pd-stop');
+            if (stopBtn) stopBtn.onclick = () => {
+                if (this._paramDiscoveryRunning) this._paramDiscoveryRunning.stop();
+                this._paramDiscoveryRunning = null;
+                this._renderParamDiscovery();
+            };
+
+            this._renderParamDiscoveryCandidates();
+            this._renderParamDiscoveryLog();
+        },
+
+        _renderParamDiscoveryCandidates() {
+            const t = Theme.palette;
+            const el = document.getElementById('ttd-pd-candidates');
+            if (!el) return;
+            if (!this._paramDiscoveryCandidates.length) { el.innerHTML = ''; return; }
+            el.innerHTML = `
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                    <span style="font-size:10px;color:${t.cardDesc};">${this._paramDiscoveryCandidates.length} URL${this._paramDiscoveryCandidates.length === 1 ? '' : 's'} sent from discovery - tap one to load it as the target above</span>
+                    <button id="ttd-pd-candidates-clear" style="${Helpers._secondaryBtnStyle(t)}padding:2px 8px;white-space:nowrap;">Clear</button>
+                </div>
+                <div style="max-height:120px;overflow-y:auto;border:1px solid ${t.rowBorder};border-radius:6px;margin-bottom:8px;">
+                    ${this._paramDiscoveryCandidates.map((u, i) => `
+                        <div data-i="${i}" class="ttd-pd-candidate-row" style="padding:5px 8px;border-bottom:1px solid ${t.rowBorder};font-size:10px;word-break:break-all;cursor:pointer;${u === this._paramDiscoveryUrl ? `background:${t.secondaryBtnBg};` : ''}">${Helpers._escape(u)}</div>
+                    `).join('')}
+                </div>
+            `;
+            el.querySelectorAll('.ttd-pd-candidate-row').forEach((row) => {
+                row.onclick = () => {
+                    this._paramDiscoveryUrl = this._paramDiscoveryCandidates[Number(row.getAttribute('data-i'))];
+                    this._renderParamDiscovery();
+                };
+            });
+            document.getElementById('ttd-pd-candidates-clear').onclick = () => { this._paramDiscoveryCandidates = []; this._renderParamDiscoveryCandidates(); };
+        },
+
+        _runParamDiscovery() {
+            const names = ActiveDiscovery.parseWordlist(this._paramDiscoveryWordlistText);
+            if (!names.length) return;
+            const targetUrl = (this._paramDiscoveryUrl || '').trim();
+            if (!targetUrl) return;
+            const delay = Math.max(ActiveDiscovery.MIN_DELAY_MS, Number(this._paramDiscoveryDelay) || 0);
+            const modeLabel = this._paramDiscoveryMode === 'privileged' ? 'Privileged (GM_xmlhttpRequest)' : 'Standard (fetch)';
+            if (!confirm(`Run hidden parameter discovery against ${targetUrl}? This sends ${names.length} real GET request${names.length === 1 ? '' : 's'} (one per parameter name) using ${modeLabel} send, ${delay}ms apart. This target may treat some GET requests as real actions - review the parameter list before proceeding if you're unsure.`)) return;
+
+            this._paramDiscoveryLog = [];
+            this._paramDiscoveryCurrentStep = null;
+            this._paramDiscoveryRunning = ActiveDiscovery.runParamDiscovery(targetUrl, names, delay, this._paramDiscoveryMode, {
+                onStart: (stepIndex, name, url, total) => {
+                    this._paramDiscoveryCurrentStep = { index: stepIndex, total, name };
+                    this._renderParamDiscoveryStatus();
+                },
+                onStep: (stepIndex, name, url, result) => {
+                    const bodyText = result.ok ? (result.rawText || (result.json ? (() => { try { return JSON.stringify(result.json); } catch { return ''; } })() : '') || '') : '';
+                    const errorSignatures = bodyText ? Recon.ERROR_BODY_PATTERNS.filter((p) => p.re.test(bodyText)).map((p) => p.label) : [];
+                    this._paramDiscoveryLog.push({ name, url, ok: result.ok, status: result.ok ? result.status : null, durationMs: result.durationMs, length: result.ok ? bodyText.length : null, errorSignatures, error: result.ok ? null : result.error, timestamp: Date.now() });
+                    this._renderParamDiscoveryLog();
+                },
+                onDone: () => {
+                    this._paramDiscoveryRunning = null;
+                    this._paramDiscoveryCurrentStep = null;
+                    this._renderParamDiscovery();
+                }
+            });
+            this._renderParamDiscovery();
+        },
+
+        _renderParamDiscoveryStatus() {
+            const t = Theme.palette;
+            const el = document.getElementById('ttd-pd-status');
+            if (!el) return;
+            const cur = this._paramDiscoveryCurrentStep;
+            if (!cur) { el.innerHTML = ''; return; }
+            const n = cur.index + 1;
+            el.innerHTML = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${t.statusWarn};margin-right:6px;animation:ttd-disc-pulse 1s ease-in-out infinite;"></span>Checking ${n}/${cur.total}: <span style="font-family:monospace;">${Helpers._escape(cur.name)}</span>
+                <style>@keyframes ttd-disc-pulse { 0%,100% { opacity:1; } 50% { opacity:.25; } }</style>`;
+        },
+
+        _renderParamDiscoveryLog() {
+            const t = Theme.palette;
+            const el = document.getElementById('ttd-pd-log');
+            if (!el) return;
+            if (!this._paramDiscoveryLog.length) { el.innerHTML = ''; return; }
+            const annotated = RequestReplay.detectAnomalies(this._paramDiscoveryLog);
+            const anomalyCount = annotated.filter((l) => l.anomaly).length;
+            el.innerHTML = `
+                <div style="font-size:11px;font-weight:700;margin-bottom:4px;">Results (${annotated.length} tried)${anomalyCount ? ` - <span style="color:${t.statusBad};">${anomalyCount} flagged</span>` : ''}</div>
+                ${annotated.length > 1 ? `<div style="font-size:9px;color:${t.cardDesc};margin-bottom:4px;">First parameter sent is treated as the baseline. Later ones are flagged when status, body length, or timing diverge from it, or when the body matches a known verbose-error signature.</div>` : ''}
+                <div style="max-height:220px;overflow-y:auto;border:1px solid ${t.rowBorder};border-radius:6px;">
+                    ${annotated.slice().reverse().map((l) => `
+                        <div style="padding:5px 8px;border-bottom:1px solid ${t.rowBorder};font-size:10px;word-break:break-all;${l.anomaly ? `background:${t.statusBad}1a;` : ''}">
+                            <b>${Helpers._escape(l.name)}</b>${l.isBaseline ? ` <span style="color:${t.cardDesc};">(baseline)</span>` : ''}
+                            - ${l.ok ? `<span style="color:${l.status >= 200 && l.status < 300 ? t.statusOk : t.statusNeutral};">${l.status}</span> - ${l.durationMs}ms${typeof l.length === 'number' ? ` - ${l.length}B` : ''}` : `<span style="color:${t.statusBad};">${Helpers._escape(l.error)}</span>`}
+                            ${l.anomaly ? ` <span style="color:${t.statusBad};font-weight:700;">- flagged</span>` : ''}
+                            ${l.anomaly ? `<div style="margin-top:3px;color:${t.statusBad};">${l.anomalyReasons.map((r) => `- ${Helpers._escape(r)}`).join('<br>')}</div>` : ''}
+                        </div>
+                    `).join('')}
+                </div>
+            `;
         },
 
         _renderCrawler() {
@@ -10567,6 +11507,22 @@
             this._addCrawlCandidates(list);
             const added = this._crawlCandidates.length - before;
             this._goToSection('crawler');
+            return added;
+        },
+
+        _sendUrlsToParamDiscovery(urls) {
+            const list = Array.from(new Set((urls || []).filter(Boolean)));
+            if (!list.length) return 0;
+            const known = new Set(this._paramDiscoveryCandidates);
+            let added = 0;
+            list.forEach((u) => {
+                if (known.has(u)) return;
+                known.add(u);
+                this._paramDiscoveryCandidates.push(u);
+                added++;
+            });
+            if (!this._paramDiscoveryUrl && list.length) this._paramDiscoveryUrl = list[0];
+            this._goToSection('paramdiscovery');
             return added;
         },
 
