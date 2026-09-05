@@ -1,5 +1,8 @@
 Tw33k Tools - Target Data (Walkthrough, v1.6.0)
 
+Screen Shots
+https://imgur.com/gallery/tw33k-tools-target-data-1-4-0-nw3CuTz
+
 A free Tampermonkey userscript that works on any browser that allows scripts. A mini-DevTools built for diagnosing what the frontend is doing - what it stores, what it sends, what it's built from - without opening real browser DevTools or writing any code. Built game-agnostic; the examples below happen to be from Torn, but nothing here is Torn-specific.
 
 How it starts
